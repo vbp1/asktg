@@ -303,14 +303,6 @@
     }
   }
 
-  async function exitApplication() {
-    try {
-      await backend().ExitApp();
-    } catch (error) {
-      errorText = String(error);
-    }
-  }
-
   async function browseDataDir() {
     dataDirBusy = true;
     errorText = "";
@@ -635,11 +627,10 @@
       <h2>Runtime</h2>
       {#if status}
         <div class="status">
-          <span>MCP: {status.mcp_enabled ? "ON" : "OFF"}</span>
-          <span>MCP status: {status.mcp_status || "unknown"}</span>
-          <span>MCP port: {status.mcp_port || 0}</span>
           <span>Tray: {trayStatus}</span>
-          <span>Endpoint: {status.mcp_endpoint || "n/a"}</span>
+          <span>Sync: {status.sync_state || "idle"}</span>
+          <span>Backfill: {status.backfill_progress}%</span>
+          <span>Messages: {status.message_count}</span>
         </div>
       {/if}
       <div class="row">
@@ -650,6 +641,18 @@
           {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
         </button>
       </div>
+    </section>
+
+    <section class="panel">
+      <h2>MCP</h2>
+      {#if status}
+        <div class="status">
+          <span>MCP: {status.mcp_enabled ? "ON" : "OFF"}</span>
+          <span>MCP status: {status.mcp_status || "unknown"}</span>
+          <span>MCP port: {status.mcp_port || 0}</span>
+          <span>Endpoint: {status.mcp_endpoint || "n/a"}</span>
+        </div>
+      {/if}
       <div class="row wrap">
         <input bind:value={mcpPort} type="number" min="0" max="65535" placeholder="MCP port (0 = random free)" />
         <button on:click={saveMCPPort} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
@@ -660,9 +663,6 @@
         </button>
         <button on:click={copyMCPEndpoint} disabled={!status || !status.mcp_endpoint}>
           Copy endpoint
-        </button>
-        <button class="danger" on:click={exitApplication}>
-          Exit app
         </button>
       </div>
     </section>
