@@ -35,6 +35,8 @@
   let trayStatus = "unknown";
   let dataDirPath = "";
   let dataDirBusy = false;
+  let currentPage = "search";
+  $: onboardingIncomplete = Boolean(onboarding && !onboarding.completed);
 
   async function refreshStatus() {
     try {
@@ -65,9 +67,16 @@
   async function refreshOnboardingStatus() {
     try {
       onboarding = await backend().OnboardingStatus();
+      if (onboarding && !onboarding.completed && currentPage === "search") {
+        currentPage = "wizard";
+      }
     } catch (error) {
       errorText = String(error);
     }
+  }
+
+  function openPage(page) {
+    currentPage = page;
   }
 
   async function refreshEmbeddingsConfig() {
@@ -359,6 +368,7 @@
       onboarding = await backend().CompleteOnboarding();
       infoText = "Onboarding completed";
       await refreshStatus();
+      currentPage = "search";
     } catch (error) {
       errorText = String(error);
     } finally {
@@ -530,186 +540,61 @@
   <section class="hero">
     <h1>Telegram Sidecar Search</h1>
     <p>Local-first FTS + Hybrid search with read-only MCP endpoint.</p>
+    <div class="row wrap navRow">
+      <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
+      <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
+      <button class:active={currentPage === "wizard"} on:click={() => openPage("wizard")}>
+        Onboarding wizard
+      </button>
+    </div>
+    {#if onboardingIncomplete}
+      <p class="mutedLine">Onboarding is incomplete. Search is locked until at least one chat is enabled.</p>
+    {/if}
   </section>
 
-  {#if onboarding && !onboarding.completed}
-    <section class="panel onboardingPanel">
-      <h2>Onboarding Wizard</h2>
-      <p class="mutedLine">Complete Telegram setup, discover chats, and enable at least one chat. Saved Messages stays disabled by default.</p>
-      <div class="row wrap">
-        <input bind:value={dataDirPath} class="pathInput" placeholder="Data directory path" />
-        <button on:click={browseDataDir} disabled={dataDirBusy || onboardingBusy}>
-          {dataDirBusy ? "Working..." : "Browse data dir"}
-        </button>
-        <button on:click={applyDataDir} disabled={dataDirBusy || onboardingBusy || !dataDirPath.trim()}>
-          {dataDirBusy ? "Working..." : "Apply data dir"}
-        </button>
-      </div>
-      <p class="mutedLine">If path changes, restart app to apply.</p>
-      <div class="status">
-        <span>Telegram configured: {onboarding.telegram_configured ? "yes" : "no"}</span>
-        <span>Telegram authorized: {onboarding.telegram_authorized ? "yes" : "no"}</span>
-        <span>Chats discovered: {onboarding.chats_discovered}</span>
-        <span>Enabled chats: {onboarding.enabled_chats}</span>
-      </div>
-      <div class="row">
-        <button on:click={completeOnboarding} disabled={onboardingBusy || onboarding.enabled_chats < 1}>
-          {onboardingBusy ? "Finishing..." : "Complete onboarding"}
-        </button>
-      </div>
+  {#if errorText}
+    <section class="panel">
+      <div class="error">{errorText}</div>
+    </section>
+  {/if}
+  {#if infoText}
+    <section class="panel">
+      <div class="info">{infoText}</div>
     </section>
   {/if}
 
-  <section class="panel">
-    <div class="row">
-      <input bind:value={query} class="searchInput" disabled={onboarding && !onboarding.completed} on:keydown={(event) => event.key === "Enter" && runSearch()} placeholder="Search messages..." />
-      <select bind:value={mode} disabled={onboarding && !onboarding.completed}>
-        <option value="hybrid">Hybrid</option>
-        <option value="fts">FTS</option>
-      </select>
-      <label class="toggle">
-        <input bind:checked={advanced} disabled={onboarding && !onboarding.completed} type="checkbox" />
-        Advanced
-      </label>
-      <button on:click={runSearch} disabled={onboarding && !onboarding.completed}>{loading ? "Searching..." : "Search"}</button>
-    </div>
-
-    {#if status}
-      <div class="status">
-        <span>MCP: {status.mcp_enabled ? "ON" : "OFF"}</span>
-        <span>MCP status: {status.mcp_status || "unknown"}</span>
-        <span>MCP port: {status.mcp_port || 0}</span>
-        <span>Tray: {trayStatus}</span>
-        <span>Endpoint: {status.mcp_endpoint || "n/a"}</span>
-        <span>Messages: {status.message_count}</span>
-        <span>Sync: {status.sync_state || "idle"}</span>
-        <span>Backfill: {status.backfill_progress}%</span>
+  {#if currentPage === "search"}
+    <section class="panel">
+      <div class="row">
+        <input
+          bind:value={query}
+          class="searchInput"
+          disabled={onboardingIncomplete}
+          on:keydown={(event) => event.key === "Enter" && runSearch()}
+          placeholder="Search messages..."
+        />
+        <select bind:value={mode} disabled={onboardingIncomplete}>
+          <option value="hybrid">Hybrid</option>
+          <option value="fts">FTS</option>
+        </select>
+        <label class="toggle">
+          <input bind:checked={advanced} disabled={onboardingIncomplete} type="checkbox" />
+          Advanced
+        </label>
+        <button on:click={runSearch} disabled={onboardingIncomplete}>
+          {loading ? "Searching..." : "Search"}
+        </button>
       </div>
-    {/if}
-    <div class="row">
-      <button on:click={runSyncNow} disabled={syncBusy || telegramBusy || (onboarding && !onboarding.completed)}>
-        {syncBusy ? "Syncing..." : "Sync now"}
-      </button>
-      <button on:click={toggleBackgroundPause} disabled={maintenanceBusy || telegramBusy || syncBusy || (onboarding && !onboarding.completed)}>
-        {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
-      </button>
-    </div>
-    <div class="row wrap">
-      <input bind:value={mcpPort} type="number" min="0" max="65535" placeholder="MCP port (0 = random free)" />
-      <button on:click={saveMCPPort} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
-        {mcpBusy ? "Working..." : "Save MCP port"}
-      </button>
-      <button on:click={toggleMCPEnabled} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
-        {mcpBusy ? "Working..." : (status && status.mcp_enabled ? "Disable MCP" : "Enable MCP")}
-      </button>
-      <button on:click={copyMCPEndpoint} disabled={!status || !status.mcp_endpoint}>
-        Copy endpoint
-      </button>
-      <button class="danger" on:click={exitApplication}>
-        Exit app
-      </button>
-    </div>
-    {#if errorText}
-      <div class="error">{errorText}</div>
-    {/if}
-    {#if infoText}
-      <div class="info">{infoText}</div>
-    {/if}
-  </section>
-
-  <section class="panel">
-    <h2>Telegram Setup</h2>
-    <div class="tgGrid">
-      <input bind:value={tgApiID} placeholder="API ID" />
-      <input bind:value={tgAPIHash} placeholder="API Hash" />
-      <input bind:value={tgPhone} placeholder="Phone (+123...)" />
-      <input bind:value={tgCode} placeholder="Login code" />
-      <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" />
-    </div>
-    <div class="row">
-      <button on:click={requestTelegramCode} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Send code"}</button>
-      <button on:click={signInTelegram} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Sign in"}</button>
-      <button on:click={loadTelegramChats} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Load chats"}</button>
-    </div>
-    {#if telegramStatus}
-      <div class="status">
-        <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
-        <span>Authorized: {telegramStatus.authorized ? "yes" : "no"}</span>
-        <span>Code pending: {telegramStatus.awaiting_code ? "yes" : "no"}</span>
-        <span>Phone: {telegramStatus.phone || "n/a"}</span>
-        <span>User: {telegramStatus.user_display || "n/a"}</span>
-      </div>
-    {/if}
-  </section>
-
-  <section class="panel">
-    <h2>Maintenance</h2>
-    <div class="status">
-      <span>Embeddings: {embConfigured ? "configured" : "not configured"}</span>
-      <span>Autostart: {autostartEnabled ? "enabled" : "disabled"}</span>
-    </div>
-    <div class="row">
-      <button on:click={toggleAutostart} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : (autostartEnabled ? "Disable autostart" : "Enable autostart")}
-      </button>
-    </div>
-    <div class="row wrap">
-      <input bind:value={embBaseURL} class="pathInput" placeholder="Embeddings base URL (OpenAI-compatible)" />
-      <input bind:value={embModel} placeholder="Model" />
-      <input bind:value={embDims} type="number" min="1" max="8192" placeholder="Dims" />
-      <input bind:value={embAPIKey} type="password" class="pathInput" placeholder="Embeddings API key (leave empty to keep current)" />
-      <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : "Save embeddings config"}
-      </button>
-      <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : "Rebuild semantic index"}
-      </button>
-    </div>
-    <div class="row wrap">
-      <input bind:value={backupPath} class="pathInput" placeholder="Backup path (.zip) or folder (optional)" />
-      <button on:click={createBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : "Create backup"}
-      </button>
-    </div>
-    <div class="row wrap">
-      <input bind:value={restorePath} class="pathInput" placeholder="Restore from backup .zip path" />
-      <button on:click={restoreBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : "Restore backup"}
-      </button>
-      <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-        {maintenanceBusy ? "Working..." : "Purge all data"}
-      </button>
-    </div>
-  </section>
-
-  <section class="grid">
-    <article class="panel">
-      <h2>Chats & Policies</h2>
-      {#each chats as chat}
-        <div class="chatRow">
-          <div class="chatMeta">
-            <strong>{chat.title}</strong>
-            <small>{chat.type}</small>
-          </div>
-          <label><input bind:checked={chat.enabled} on:change={() => updatePolicy(chat)} type="checkbox" /> enabled</label>
-          <label><input bind:checked={chat.allow_embeddings} on:change={() => updatePolicy(chat)} type="checkbox" /> embeddings</label>
-          <select bind:value={chat.history_mode} on:change={() => updatePolicy(chat)}>
-            <option value="full">full</option>
-            <option value="lazy">lazy</option>
-          </select>
-          <select bind:value={chat.urls_mode} on:change={() => updatePolicy(chat)}>
-            <option value="off">off</option>
-            <option value="lazy">lazy</option>
-            <option value="full">full</option>
-          </select>
-          <button class="danger small" on:click={() => purgeChatData(chat)} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-            purge
-          </button>
+      {#if status}
+        <div class="status">
+          <span>Messages: {status.message_count}</span>
+          <span>Sync: {status.sync_state || "idle"}</span>
+          <span>Backfill: {status.backfill_progress}%</span>
         </div>
-      {/each}
-    </article>
+      {/if}
+    </section>
 
-    <article class="panel">
+    <section class="panel">
       <h2>Results</h2>
       {#if results.length === 0}
         <div class="empty">No results yet. Run a search.</div>
@@ -742,6 +627,165 @@
           </div>
         </div>
       {/each}
-    </article>
-  </section>
+    </section>
+  {/if}
+
+  {#if currentPage === "settings"}
+    <section class="panel">
+      <h2>Runtime</h2>
+      {#if status}
+        <div class="status">
+          <span>MCP: {status.mcp_enabled ? "ON" : "OFF"}</span>
+          <span>MCP status: {status.mcp_status || "unknown"}</span>
+          <span>MCP port: {status.mcp_port || 0}</span>
+          <span>Tray: {trayStatus}</span>
+          <span>Endpoint: {status.mcp_endpoint || "n/a"}</span>
+        </div>
+      {/if}
+      <div class="row">
+        <button on:click={runSyncNow} disabled={syncBusy || telegramBusy || onboardingIncomplete}>
+          {syncBusy ? "Syncing..." : "Sync now"}
+        </button>
+        <button on:click={toggleBackgroundPause} disabled={maintenanceBusy || telegramBusy || syncBusy || onboardingIncomplete}>
+          {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
+        </button>
+      </div>
+      <div class="row wrap">
+        <input bind:value={mcpPort} type="number" min="0" max="65535" placeholder="MCP port (0 = random free)" />
+        <button on:click={saveMCPPort} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
+          {mcpBusy ? "Working..." : "Save MCP port"}
+        </button>
+        <button on:click={toggleMCPEnabled} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
+          {mcpBusy ? "Working..." : (status && status.mcp_enabled ? "Disable MCP" : "Enable MCP")}
+        </button>
+        <button on:click={copyMCPEndpoint} disabled={!status || !status.mcp_endpoint}>
+          Copy endpoint
+        </button>
+        <button class="danger" on:click={exitApplication}>
+          Exit app
+        </button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Maintenance</h2>
+      <div class="status">
+        <span>Embeddings: {embConfigured ? "configured" : "not configured"}</span>
+        <span>Autostart: {autostartEnabled ? "enabled" : "disabled"}</span>
+      </div>
+      <div class="row">
+        <button on:click={toggleAutostart} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : (autostartEnabled ? "Disable autostart" : "Enable autostart")}
+        </button>
+      </div>
+      <div class="row wrap">
+        <input bind:value={embBaseURL} class="pathInput" placeholder="Embeddings base URL (OpenAI-compatible)" />
+        <input bind:value={embModel} placeholder="Model" />
+        <input bind:value={embDims} type="number" min="1" max="8192" placeholder="Dims" />
+        <input bind:value={embAPIKey} type="password" class="pathInput" placeholder="Embeddings API key (leave empty to keep current)" />
+        <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : "Save embeddings config"}
+        </button>
+        <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : "Rebuild semantic index"}
+        </button>
+      </div>
+      <div class="row wrap">
+        <input bind:value={backupPath} class="pathInput" placeholder="Backup path (.zip) or folder (optional)" />
+        <button on:click={createBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : "Create backup"}
+        </button>
+      </div>
+      <div class="row wrap">
+        <input bind:value={restorePath} class="pathInput" placeholder="Restore from backup .zip path" />
+        <button on:click={restoreBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : "Restore backup"}
+        </button>
+        <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+          {maintenanceBusy ? "Working..." : "Purge all data"}
+        </button>
+      </div>
+    </section>
+  {/if}
+
+  {#if currentPage === "wizard"}
+    <section class="panel onboardingPanel">
+      <h2>Onboarding Wizard</h2>
+      <p class="mutedLine">Complete Telegram setup, discover chats, and enable at least one chat. Saved Messages stays disabled by default.</p>
+      <div class="row wrap">
+        <input bind:value={dataDirPath} class="pathInput" placeholder="Data directory path" />
+        <button on:click={browseDataDir} disabled={dataDirBusy || onboardingBusy}>
+          {dataDirBusy ? "Working..." : "Browse data dir"}
+        </button>
+        <button on:click={applyDataDir} disabled={dataDirBusy || onboardingBusy || !dataDirPath.trim()}>
+          {dataDirBusy ? "Working..." : "Apply data dir"}
+        </button>
+      </div>
+      <p class="mutedLine">If path changes, restart app to apply.</p>
+      {#if onboarding}
+        <div class="status">
+          <span>Telegram configured: {onboarding.telegram_configured ? "yes" : "no"}</span>
+          <span>Telegram authorized: {onboarding.telegram_authorized ? "yes" : "no"}</span>
+          <span>Chats discovered: {onboarding.chats_discovered}</span>
+          <span>Enabled chats: {onboarding.enabled_chats}</span>
+        </div>
+        <div class="row">
+          <button on:click={completeOnboarding} disabled={onboardingBusy || onboarding.enabled_chats < 1}>
+            {onboardingBusy ? "Finishing..." : "Complete onboarding"}
+          </button>
+        </div>
+      {/if}
+    </section>
+
+    <section class="panel">
+      <h2>Telegram Setup</h2>
+      <div class="tgGrid">
+        <input bind:value={tgApiID} placeholder="API ID" />
+        <input bind:value={tgAPIHash} placeholder="API Hash" />
+        <input bind:value={tgPhone} placeholder="Phone (+123...)" />
+        <input bind:value={tgCode} placeholder="Login code" />
+        <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" />
+      </div>
+      <div class="row">
+        <button on:click={requestTelegramCode} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Send code"}</button>
+        <button on:click={signInTelegram} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Sign in"}</button>
+        <button on:click={loadTelegramChats} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Load chats"}</button>
+      </div>
+      {#if telegramStatus}
+        <div class="status">
+          <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
+          <span>Authorized: {telegramStatus.authorized ? "yes" : "no"}</span>
+          <span>Code pending: {telegramStatus.awaiting_code ? "yes" : "no"}</span>
+          <span>Phone: {telegramStatus.phone || "n/a"}</span>
+          <span>User: {telegramStatus.user_display || "n/a"}</span>
+        </div>
+      {/if}
+    </section>
+
+    <section class="panel">
+      <h2>Chats & Policies</h2>
+      {#each chats as chat}
+        <div class="chatRow">
+          <div class="chatMeta">
+            <strong>{chat.title}</strong>
+            <small>{chat.type}</small>
+          </div>
+          <label><input bind:checked={chat.enabled} on:change={() => updatePolicy(chat)} type="checkbox" /> enabled</label>
+          <label><input bind:checked={chat.allow_embeddings} on:change={() => updatePolicy(chat)} type="checkbox" /> embeddings</label>
+          <select bind:value={chat.history_mode} on:change={() => updatePolicy(chat)}>
+            <option value="full">full</option>
+            <option value="lazy">lazy</option>
+          </select>
+          <select bind:value={chat.urls_mode} on:change={() => updatePolicy(chat)}>
+            <option value="off">off</option>
+            <option value="lazy">lazy</option>
+            <option value="full">full</option>
+          </select>
+          <button class="danger small" on:click={() => purgeChatData(chat)} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+            purge
+          </button>
+        </div>
+      {/each}
+    </section>
+  {/if}
 </main>

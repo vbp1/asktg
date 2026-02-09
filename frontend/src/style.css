@@ -79,6 +79,20 @@ body {
   flex-wrap: wrap;
 }
 
+.navRow {
+  margin-top: 12px;
+}
+
+.navRow button {
+  background: #141a21;
+  border: 1px solid var(--line);
+}
+
+.navRow button.active {
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  border-color: transparent;
+}
+
 input,
 select,
 button {
