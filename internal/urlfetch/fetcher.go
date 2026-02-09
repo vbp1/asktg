@@ -1,0 +1,182 @@
+package urlfetch
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"asktg/internal/security"
+
+	"github.com/PuerkitoBio/goquery"
+)
+
+var (
+	urlRegex         = regexp.MustCompile(`https?://[^\s<>"'()]+`)
+	spaceNormalize   = regexp.MustCompile(`\s+`)
+	ErrURLBlocked    = errors.New("url blocked by security policy")
+	ErrFetchTooLarge = errors.New("response body exceeds maximum size")
+)
+
+type Result struct {
+	FinalURL      string
+	Title         string
+	ExtractedText string
+	Hash          string
+}
+
+func ExtractURLs(text string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	matches := urlRegex.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	urls := make([]string, 0, minInt(limit, len(matches)))
+	for _, item := range matches {
+		cleaned := strings.TrimSpace(strings.Trim(item, ".,;:!?)[]{}\"'"))
+		if cleaned == "" {
+			continue
+		}
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		urls = append(urls, cleaned)
+		if len(urls) >= limit {
+			break
+		}
+	}
+	return urls
+}
+
+func Fetch(ctx context.Context, rawURL string) (Result, error) {
+	if err := security.ValidateFetchURL(rawURL); err != nil {
+		return Result{}, errors.Join(ErrURLBlocked, err)
+	}
+
+	client := &http.Client{
+		Timeout: security.DefaultFetchTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= security.DefaultMaxRedirects {
+				return errors.New("too many redirects")
+			}
+			if err := security.ValidateFetchURL(req.URL.String()); err != nil {
+				return errors.Join(ErrURLBlocked, err)
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return Result{}, err
+	}
+	req.Header.Set("User-Agent", "asktg-url-fetch/0.1")
+	req.Header.Set("Accept", "text/html, text/plain;q=0.9, */*;q=0.5")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return Result{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return Result{}, errors.New(resp.Status)
+	}
+
+	if err := security.ValidateFetchURL(resp.Request.URL.String()); err != nil {
+		return Result{}, errors.Join(ErrURLBlocked, err)
+	}
+
+	reader := io.LimitReader(resp.Body, security.DefaultMaxSizeBytes+1)
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return Result{}, err
+	}
+	if int64(len(body)) > security.DefaultMaxSizeBytes {
+		return Result{}, ErrFetchTooLarge
+	}
+
+	finalURL := normalizeURL(resp.Request.URL)
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+
+	title, extracted := extractContent(body, contentType)
+	if extracted == "" {
+		extracted = title
+	}
+	extracted = normalizeSpace(extracted)
+	title = normalizeSpace(title)
+
+	hashRaw := sha256.Sum256(body)
+	return Result{
+		FinalURL:      finalURL,
+		Title:         title,
+		ExtractedText: extracted,
+		Hash:          hex.EncodeToString(hashRaw[:]),
+	}, nil
+}
+
+func extractContent(body []byte, contentType string) (string, string) {
+	rawBody := string(body)
+	looksHTML := strings.Contains(contentType, "text/html") ||
+		strings.Contains(contentType, "application/xhtml") ||
+		strings.Contains(rawBody, "<html") ||
+		strings.Contains(rawBody, "<body")
+	if !looksHTML {
+		raw := normalizeSpace(rawBody)
+		if len(raw) > 10000 {
+			raw = raw[:10000]
+		}
+		return "", raw
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(rawBody))
+	if err != nil {
+		raw := normalizeSpace(rawBody)
+		if len(raw) > 10000 {
+			raw = raw[:10000]
+		}
+		return "", raw
+	}
+
+	doc.Find("script,style,noscript").Each(func(_ int, selection *goquery.Selection) {
+		selection.Remove()
+	})
+
+	title := doc.Find("title").First().Text()
+	text := doc.Find("body").Text()
+	if strings.TrimSpace(text) == "" {
+		text = doc.Text()
+	}
+	if len(text) > 20000 {
+		text = text[:20000]
+	}
+	return title, text
+}
+
+func normalizeSpace(value string) string {
+	return strings.TrimSpace(spaceNormalize.ReplaceAllString(value, " "))
+}
+
+func normalizeURL(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	copyURL := *parsed
+	copyURL.Fragment = ""
+	return copyURL.String()
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
