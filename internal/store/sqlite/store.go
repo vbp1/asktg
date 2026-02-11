@@ -776,7 +776,11 @@ func (s *Store) EnableEmbeddingsForEnabledChats(ctx context.Context) (int, error
 	res, err := s.db.ExecContext(ctx, `
 UPDATE chats
 SET allow_embeddings = 1,
-    embeddings_since_unix = CASE WHEN embeddings_since_unix <= 0 THEN ? ELSE embeddings_since_unix END
+    embeddings_since_unix = CASE
+      WHEN history_mode = 'full' THEN 0
+      WHEN embeddings_since_unix <= 0 THEN ?
+      ELSE embeddings_since_unix
+    END
 WHERE enabled = 1
   AND allow_embeddings = 0
 `, nowUnix)
