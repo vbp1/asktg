@@ -1547,10 +1547,14 @@ func BuildBestEffortDeepLink(chatID int64, msgID int64) string {
 	if chatID == 0 || msgID <= 0 {
 		return ""
 	}
-	// Prefer official message links for supergroups/channels where possible.
-	// Telegram chat IDs for those are typically -100<channel_id>.
+	// Prefer Telegram deep links that open in the native app (no browser hop).
+	// For supergroups/channels, chat IDs are commonly represented as -100<channel_id>.
 	if channelID, ok := toTmeChannelID(chatID); ok {
-		return fmt.Sprintf("https://t.me/c/%d/%d", channelID, msgID)
+		return fmt.Sprintf("tg://privatepost?channel=%d&post=%d", channelID, msgID)
+	}
+	// For private chats, the peer ID is the user ID.
+	if chatID > 0 {
+		return fmt.Sprintf("tg://openmessage?user_id=%d&message_id=%d", chatID, msgID)
 	}
 	return fmt.Sprintf("tg://openmessage?chat_id=%d&message_id=%d", chatID, msgID)
 }

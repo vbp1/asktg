@@ -281,7 +281,10 @@ func buildDeepLink(chatID int64, msgID int64) string {
 		return ""
 	}
 	if channelID, ok := toTmeChannelID(chatID); ok {
-		return fmt.Sprintf("https://t.me/c/%d/%d", channelID, msgID)
+		return fmt.Sprintf("tg://privatepost?channel=%d&post=%d", channelID, msgID)
+	}
+	if chatID > 0 {
+		return fmt.Sprintf("tg://openmessage?user_id=%d&message_id=%d", chatID, msgID)
 	}
 	return fmt.Sprintf("tg://openmessage?chat_id=%d&message_id=%d", chatID, msgID)
 }
