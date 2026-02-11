@@ -229,6 +229,12 @@ func (a *App) configureEmbeddingsFromStore(ctx context.Context) {
 	if a.vectorIndex == nil || a.vectorIndex.Dimensions() != dims {
 		a.vectorIndex = vector.NewHNSW(dims, hnswM, hnswEfConstruction, hnswEfSearch)
 	}
+
+	// If the user has set History=Backfill, semantic embeddings should include the full history.
+	// Ensure embeddings_since_unix is corrected without requiring an explicit rebuild click.
+	if _, err := a.store.BackfillEmbeddingsForEnabledChats(ctx); err != nil {
+		runtime.LogWarningf(ctx, "embeddings backfill scope update failed: %v", err)
+	}
 }
 
 func (a *App) readSecretSetting(ctx context.Context, key string) (string, error) {
