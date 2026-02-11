@@ -942,19 +942,56 @@
           <option value="fts">FTS</option>
         </select>
         {#if mode === "hybrid"}
-          <label>
-            Semantic
-            <select
-              bind:value={semanticStrictness}
-              disabled={!embConfigured || semanticStrictnessBusy}
-              on:change={(e) => saveSemanticStrictness(e.currentTarget.value)}
-              title="How strict semantic matches should be. Stricter = fewer but more relevant."
-            >
-              <option value="very">Очень похоже</option>
-              <option value="similar">Похоже</option>
-              <option value="weak">Слабо похоже</option>
-            </select>
-          </label>
+          <div class="semanticToggle" title="Насколько строго показывать семантические совпадения. Строже = меньше, но релевантнее.">
+            <span class="fieldLabel">Semantic</span>
+            <div class="pills" aria-label="Semantic strictness">
+              <label
+                class:active={semanticStrictness === "very"}
+                class:disabled={!embConfigured || semanticStrictnessBusy}
+                title="Очень похоже (самое строгое)"
+              >
+                <input
+                  type="radio"
+                  name="semantic-strictness"
+                  value="very"
+                  checked={semanticStrictness === "very"}
+                  disabled={!embConfigured || semanticStrictnessBusy}
+                  on:change={() => saveSemanticStrictness("very")}
+                />
+                Очень
+              </label>
+              <label
+                class:active={semanticStrictness === "similar"}
+                class:disabled={!embConfigured || semanticStrictnessBusy}
+                title="Похоже (по умолчанию)"
+              >
+                <input
+                  type="radio"
+                  name="semantic-strictness"
+                  value="similar"
+                  checked={semanticStrictness === "similar"}
+                  disabled={!embConfigured || semanticStrictnessBusy}
+                  on:change={() => saveSemanticStrictness("similar")}
+                />
+                Похоже
+              </label>
+              <label
+                class:active={semanticStrictness === "weak"}
+                class:disabled={!embConfigured || semanticStrictnessBusy}
+                title="Слабо похоже (мягче, больше результатов)"
+              >
+                <input
+                  type="radio"
+                  name="semantic-strictness"
+                  value="weak"
+                  checked={semanticStrictness === "weak"}
+                  disabled={!embConfigured || semanticStrictnessBusy}
+                  on:change={() => saveSemanticStrictness("weak")}
+                />
+                Слабо
+              </label>
+            </div>
+          </div>
         {/if}
         <label class="toggle">
           <input bind:checked={advanced} type="checkbox" />
