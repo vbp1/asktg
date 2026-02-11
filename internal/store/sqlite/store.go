@@ -753,6 +753,22 @@ func (s *Store) ResetEmbeddings(ctx context.Context) error {
 	return tx.Commit()
 }
 
+func (s *Store) EnableEmbeddingsForEnabledChats(ctx context.Context) (int, error) {
+	nowUnix := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `
+UPDATE chats
+SET allow_embeddings = 1,
+    embeddings_since_unix = CASE WHEN embeddings_since_unix <= 0 THEN ? ELSE embeddings_since_unix END
+WHERE enabled = 1
+  AND allow_embeddings = 0
+`, nowUnix)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return int(affected), nil
+}
+
 type embeddingTaskPayload struct {
 	ChunkID int64 `json:"chunk_id"`
 }

@@ -727,6 +727,7 @@ func (a *App) SetEmbeddingsConfig(baseURL, model, apiKey string, dimensions int)
 	if a.store == nil {
 		return errors.New("store is not initialized")
 	}
+	prevKey, _ := a.readSecretSetting(a.ctx, "embeddings_api_key")
 	cleanBase := strings.TrimSpace(baseURL)
 	if cleanBase == "" {
 		cleanBase = "https://api.openai.com/v1"
@@ -756,6 +757,11 @@ func (a *App) SetEmbeddingsConfig(baseURL, model, apiKey string, dimensions int)
 	}
 
 	a.configureEmbeddingsFromStore(a.ctx)
+	if strings.TrimSpace(prevKey) == "" && a.embedClient != nil && a.embedClient.Configured() {
+		ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
+		defer cancel()
+		_, _ = a.store.EnableEmbeddingsForEnabledChats(ctx)
+	}
 	if prevDims != dimensions {
 		ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
 		defer cancel()

@@ -57,6 +57,7 @@
   $: visibleChats = chatsForFolder(chats, activeChatFolder);
   $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
   $: dirtyCount = dirtyChatIds.length;
+  $: semanticResultCount = (results || []).filter((r) => r && r.match_semantic).length;
 
   function syncChatEditsFromChats(items) {
     const nextChatsById = {};
@@ -845,6 +846,9 @@
 
     <section class="panel">
       <h2>Results</h2>
+      {#if mode === "hybrid"}
+        <p class="mutedLine">Semantic matches: {semanticResultCount}{!embConfigured ? " (embeddings not configured)" : ""}</p>
+      {/if}
       {#if results.length === 0}
         <div class="empty">No results yet. Run a search.</div>
       {/if}
