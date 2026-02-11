@@ -90,6 +90,10 @@ export function Search(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
   return window['go']['main']['App']['Search'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
 }
 
+export function SemanticStrictness() {
+  return window['go']['main']['App']['SemanticStrictness']();
+}
+
 export function SetAutostartEnabled(arg1) {
   return window['go']['main']['App']['SetAutostartEnabled'](arg1);
 }
@@ -108,6 +112,10 @@ export function SetEmbeddingsConfig(arg1, arg2, arg3, arg4) {
 
 export function SetMCPPort(arg1) {
   return window['go']['main']['App']['SetMCPPort'](arg1);
+}
+
+export function SetSemanticStrictness(arg1) {
+  return window['go']['main']['App']['SetSemanticStrictness'](arg1);
 }
 
 export function Status() {

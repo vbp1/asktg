@@ -34,6 +34,8 @@
   let embProgress = null;
   let embProgressBusy = false;
   let embProgressTimer = null;
+  let semanticStrictness = "similar"; // "very" | "similar" | "weak"
+  let semanticStrictnessBusy = false;
   let autostartEnabled = false;
   let backgroundPaused = false;
   let mcpPort = 0;
@@ -345,6 +347,36 @@
       embAPIKey = "";
     } catch (error) {
       errorText = String(error);
+    }
+  }
+
+  async function refreshSemanticStrictness() {
+    if (!backend()?.SemanticStrictness) {
+      return;
+    }
+    try {
+      semanticStrictness = (await backend().SemanticStrictness()) || "similar";
+    } catch {
+      // ignore
+    }
+  }
+
+  async function saveSemanticStrictness(next) {
+    if (!backend()?.SetSemanticStrictness) {
+      return;
+    }
+    semanticStrictnessBusy = true;
+    errorText = "";
+    infoText = "";
+    try {
+      await backend().SetSemanticStrictness(next);
+      semanticStrictness = next;
+      infoText = "Semantic strictness saved";
+    } catch (error) {
+      errorText = String(error);
+      await refreshSemanticStrictness();
+    } finally {
+      semanticStrictnessBusy = false;
     }
   }
 
@@ -801,6 +833,7 @@
   refreshTelegramStatus();
   refreshOnboardingStatus();
   refreshEmbeddingsConfig();
+  refreshSemanticStrictness();
   refreshAutostart();
   refreshBackgroundPaused();
   refreshTrayStatus();
@@ -891,6 +924,21 @@
           <option value="hybrid">Hybrid</option>
           <option value="fts">FTS</option>
         </select>
+        {#if mode === "hybrid"}
+          <label>
+            Semantic
+            <select
+              bind:value={semanticStrictness}
+              disabled={!embConfigured || semanticStrictnessBusy}
+              on:change={(e) => saveSemanticStrictness(e.currentTarget.value)}
+              title="How strict semantic matches should be. Stricter = fewer but more relevant."
+            >
+              <option value="very">Очень похоже</option>
+              <option value="similar">Похоже</option>
+              <option value="weak">Слабо похоже</option>
+            </select>
+          </label>
+        {/if}
         <label class="toggle">
           <input bind:checked={advanced} type="checkbox" />
           Advanced

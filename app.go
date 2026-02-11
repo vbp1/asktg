@@ -49,13 +49,24 @@ const (
 	windowStateNormal     = "normal"
 	windowStateMaximised  = "maximised"
 	windowStateFullscreen = "fullscreen"
+)
 
+type semanticProfile struct {
+	MaxDistance float64
+	Slack       float64
+}
+
+var semanticProfiles = map[string]semanticProfile{
 	// Embeddings returned by the OpenAI-compatible API are unit-normalized (||v|| ~= 1),
 	// and we use squared L2 distance: d^2 = 2 - 2*cos(theta).
-	// A cutoff of 1.0 ~= cos >= 0.5 avoids showing "semantic" matches for unrelated queries.
-	semanticMaxDistance   = 1.0
-	semanticDistanceSlack = 0.25
-)
+	//
+	// very:   max 0.65 ~= cos >= 0.675
+	// similar max 0.90 ~= cos >= 0.55
+	// weak:   max 1.15 ~= cos >= 0.425
+	"very":    {MaxDistance: 0.65, Slack: 0.15},
+	"similar": {MaxDistance: 0.90, Slack: 0.25},
+	"weak":    {MaxDistance: 1.15, Slack: 0.35},
+}
 
 // App struct
 type App struct {
@@ -851,6 +862,24 @@ func (a *App) EmbeddingsProgress() (domain.EmbeddingsProgress, error) {
 	return a.store.EmbeddingsProgress(ctx)
 }
 
+func (a *App) SemanticStrictness() (string, error) {
+	if a.store == nil {
+		return "", errors.New("store is not initialized")
+	}
+	raw, err := a.store.GetSetting(a.ctx, "semantic_strictness", "similar")
+	if err != nil {
+		return "similar", err
+	}
+	return normalizeSemanticStrictness(raw), nil
+}
+
+func (a *App) SetSemanticStrictness(level string) error {
+	if a.store == nil {
+		return errors.New("store is not initialized")
+	}
+	return a.store.SetSetting(a.ctx, "semantic_strictness", normalizeSemanticStrictness(level))
+}
+
 func (a *App) OnboardingStatus() (domain.OnboardingStatus, error) {
 	if a.store == nil {
 		return domain.OnboardingStatus{}, errors.New("store is not initialized")
@@ -1112,7 +1141,8 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	}
 
 	vectorCandidates := a.vectorIndex.Search(vectors[0], 300)
-	vectorCandidates = filterSemanticCandidates(vectorCandidates)
+	profile := a.semanticProfile(ctx)
+	vectorCandidates = filterSemanticCandidates(vectorCandidates, profile)
 	if len(vectorCandidates) == 0 {
 		return ftsResults, nil
 	}
@@ -1124,13 +1154,38 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	return fuseByRRF(ftsResults, vectorResults, req.Filters.Limit), nil
 }
 
-func filterSemanticCandidates(candidates []vector.Candidate) []vector.Candidate {
+func (a *App) semanticProfile(ctx context.Context) semanticProfile {
+	if a.store == nil {
+		return semanticProfiles["similar"]
+	}
+	raw, err := a.store.GetSetting(ctx, "semantic_strictness", "similar")
+	if err != nil {
+		return semanticProfiles["similar"]
+	}
+	profile, ok := semanticProfiles[normalizeSemanticStrictness(raw)]
+	if !ok {
+		return semanticProfiles["similar"]
+	}
+	return profile
+}
+
+func normalizeSemanticStrictness(level string) string {
+	clean := strings.ToLower(strings.TrimSpace(level))
+	switch clean {
+	case "very", "similar", "weak":
+		return clean
+	default:
+		return "similar"
+	}
+}
+
+func filterSemanticCandidates(candidates []vector.Candidate, profile semanticProfile) []vector.Candidate {
 	if len(candidates) == 0 {
 		return candidates
 	}
 	best := candidates[0].Distance
-	maxAllowed := semanticMaxDistance
-	if capAllowed := best + semanticDistanceSlack; capAllowed < maxAllowed {
+	maxAllowed := profile.MaxDistance
+	if capAllowed := best + profile.Slack; capAllowed < maxAllowed {
 		maxAllowed = capAllowed
 	}
 	out := candidates[:0]
