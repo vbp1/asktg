@@ -49,6 +49,12 @@ const (
 	windowStateNormal     = "normal"
 	windowStateMaximised  = "maximised"
 	windowStateFullscreen = "fullscreen"
+
+	// Embeddings returned by the OpenAI-compatible API are unit-normalized (||v|| ~= 1),
+	// and we use squared L2 distance: d^2 = 2 - 2*cos(theta).
+	// A cutoff of 1.0 ~= cos >= 0.5 avoids showing "semantic" matches for unrelated queries.
+	semanticMaxDistance   = 1.0
+	semanticDistanceSlack = 0.25
 )
 
 // App struct
@@ -1106,6 +1112,7 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	}
 
 	vectorCandidates := a.vectorIndex.Search(vectors[0], 300)
+	vectorCandidates = filterSemanticCandidates(vectorCandidates)
 	if len(vectorCandidates) == 0 {
 		return ftsResults, nil
 	}
@@ -1115,6 +1122,24 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 		return ftsResults, nil
 	}
 	return fuseByRRF(ftsResults, vectorResults, req.Filters.Limit), nil
+}
+
+func filterSemanticCandidates(candidates []vector.Candidate) []vector.Candidate {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	best := candidates[0].Distance
+	maxAllowed := semanticMaxDistance
+	if capAllowed := best + semanticDistanceSlack; capAllowed < maxAllowed {
+		maxAllowed = capAllowed
+	}
+	out := candidates[:0]
+	for _, c := range candidates {
+		if c.Distance <= maxAllowed {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchRequest, candidates []vector.Candidate) ([]domain.SearchResult, error) {
