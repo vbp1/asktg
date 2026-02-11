@@ -127,9 +127,21 @@
   }
 
   function setChatEdit(chatId, patch) {
-    const prev = chatEdits[chatId];
     const base = chatsById[chatId];
-    if (!prev || !base) return;
+    if (!base) return;
+
+    let prev = chatEdits[chatId];
+    if (!prev) {
+      prev = {
+        enabled: base.enabled,
+        allow_embeddings: base.allow_embeddings,
+        history_mode: base.history_mode,
+        urls_mode: base.urls_mode,
+        dirty: false,
+        saving: false,
+      };
+      chatEdits = { ...chatEdits, [chatId]: prev };
+    }
 
     const next = { ...prev, ...patch };
     next.dirty =
