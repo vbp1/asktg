@@ -4,6 +4,7 @@ package tray
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"time"
 
@@ -47,62 +48,68 @@ func (m *Manager) Start() error {
 	m.mu.Unlock()
 
 	readyCh := make(chan struct{})
-	go systray.Run(func() {
-		if len(m.icon) > 0 {
-			systray.SetIcon(m.icon)
-		}
-		systray.SetTitle("asktg")
-		systray.SetTooltip("asktg")
-		systray.SetTrayIconClickHandler(func(button systray.TrayIconMouseButton) {
-			if button != systray.TrayIconMouseButtonLeft {
-				return
+	go func() {
+		// systray's Win32 message pump must run on a single OS thread.
+		// If it migrates between threads, tray interactions may stop working
+		// (e.g. right-click menu not showing) after unrelated app activity.
+		runtime.LockOSThread()
+		systray.Run(func() {
+			if len(m.icon) > 0 {
+				systray.SetIcon(m.icon)
 			}
-			if m.WindowVisible() {
-				return
-			}
-			if m.onShow != nil {
-				m.onShow()
-			}
-			m.SetWindowVisible(true)
-		})
-
-		m.showHide = systray.AddMenuItem("Hide Window", "Hide app window")
-		m.exitItem = systray.AddMenuItem("Exit", "Exit asktg")
-
-		m.mu.Lock()
-		m.ready = true
-		visible := m.visible
-		m.mu.Unlock()
-		m.applyVisibleTitle(visible)
-
-		m.clickWG.Add(1)
-		go func() {
-			defer m.clickWG.Done()
-			for {
-				select {
-				case <-m.showHide.ClickedCh:
-					if m.WindowVisible() {
-						if m.onHide != nil {
-							m.onHide()
-						}
-						m.SetWindowVisible(false)
-					} else {
-						if m.onShow != nil {
-							m.onShow()
-						}
-						m.SetWindowVisible(true)
-					}
-				case <-m.exitItem.ClickedCh:
-					if m.onExit != nil {
-						m.onExit()
-					}
+			systray.SetTitle("asktg")
+			systray.SetTooltip("asktg")
+			systray.SetTrayIconClickHandler(func(button systray.TrayIconMouseButton) {
+				if button != systray.TrayIconMouseButtonLeft {
 					return
 				}
-			}
-		}()
+				if m.WindowVisible() {
+					return
+				}
+				if m.onShow != nil {
+					m.onShow()
+				}
+				m.SetWindowVisible(true)
+			})
 
-		close(readyCh)
-	}, func() {})
+			m.showHide = systray.AddMenuItem("Hide Window", "Hide app window")
+			m.exitItem = systray.AddMenuItem("Exit", "Exit asktg")
+
+			m.mu.Lock()
+			m.ready = true
+			visible := m.visible
+			m.mu.Unlock()
+			m.applyVisibleTitle(visible)
+
+			m.clickWG.Add(1)
+			go func() {
+				defer m.clickWG.Done()
+				for {
+					select {
+					case <-m.showHide.ClickedCh:
+						if m.WindowVisible() {
+							if m.onHide != nil {
+								m.onHide()
+							}
+							m.SetWindowVisible(false)
+						} else {
+							if m.onShow != nil {
+								m.onShow()
+							}
+							m.SetWindowVisible(true)
+						}
+					case <-m.exitItem.ClickedCh:
+						if m.onExit != nil {
+							m.onExit()
+						}
+						return
+					}
+				}
+			}()
+
+			close(readyCh)
+		}, func() {})
+	}()
 
 	select {
 	case <-readyCh:
