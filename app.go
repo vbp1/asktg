@@ -60,12 +60,16 @@ var semanticProfiles = map[string]semanticProfile{
 	// Embeddings returned by the OpenAI-compatible API are unit-normalized (||v|| ~= 1),
 	// and we use squared L2 distance: d^2 = 2 - 2*cos(theta).
 	//
-	// very:   max 0.65 ~= cos >= 0.675
-	// similar max 0.90 ~= cos >= 0.55
-	// weak:   max 1.15 ~= cos >= 0.425
-	"very":    {MaxDistance: 0.65, Slack: 0.15},
-	"similar": {MaxDistance: 0.90, Slack: 0.25},
-	"weak":    {MaxDistance: 1.15, Slack: 0.35},
+	// Note: with short 1-word queries, we commonly observe best distances around ~1.3 in real data,
+	// so the defaults must be permissive enough to return *some* semantic candidates, while still
+	// allowing users to tighten it.
+	//
+	// very:   max 1.15 ~= cos >= 0.425
+	// similar max 1.40 ~= cos >= 0.30
+	// weak:   max 1.70 ~= cos >= 0.15
+	"very":    {MaxDistance: 1.15, Slack: 0.15},
+	"similar": {MaxDistance: 1.40, Slack: 0.25},
+	"weak":    {MaxDistance: 1.70, Slack: 0.35},
 }
 
 // App struct
