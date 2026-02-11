@@ -30,6 +30,10 @@ export function EmbeddingsConfig() {
   return window['go']['main']['App']['EmbeddingsConfig']();
 }
 
+export function EmbeddingsProgress() {
+  return window['go']['main']['App']['EmbeddingsProgress']();
+}
+
 export function ExitApp() {
   return window['go']['main']['App']['ExitApp']();
 }

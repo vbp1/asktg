@@ -123,6 +123,14 @@ type ChatFolder struct {
 	PinnedChatIDs []int64 `json:"pinned_chat_ids,omitempty"`
 }
 
+type EmbeddingsProgress struct {
+	TotalEligible int `json:"total_eligible"`
+	Embedded      int `json:"embedded"`
+	QueuePending  int `json:"queue_pending"`
+	QueueRunning  int `json:"queue_running"`
+	QueueFailed   int `json:"queue_failed"`
+}
+
 func (s *IndexStatus) Touch() {
 	s.UpdatedAtUnix = time.Now().Unix()
 }

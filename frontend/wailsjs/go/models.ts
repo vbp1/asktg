@@ -70,6 +70,26 @@ export namespace domain {
 	        this.configured = source["configured"];
 	    }
 	}
+	export class EmbeddingsProgress {
+	    total_eligible: number;
+	    embedded: number;
+	    queue_pending: number;
+	    queue_running: number;
+	    queue_failed: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new EmbeddingsProgress(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total_eligible = source["total_eligible"];
+	        this.embedded = source["embedded"];
+	        this.queue_pending = source["queue_pending"];
+	        this.queue_running = source["queue_running"];
+	        this.queue_failed = source["queue_failed"];
+	    }
+	}
 	export class EmbeddingsTestResult {
 	    ok: boolean;
 	    base_url: string;

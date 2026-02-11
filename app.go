@@ -836,6 +836,15 @@ func (a *App) TestEmbeddings() (domain.EmbeddingsTestResult, error) {
 	}, nil
 }
 
+func (a *App) EmbeddingsProgress() (domain.EmbeddingsProgress, error) {
+	if a.store == nil {
+		return domain.EmbeddingsProgress{}, errors.New("store is not initialized")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	return a.store.EmbeddingsProgress(ctx)
+}
+
 func (a *App) OnboardingStatus() (domain.OnboardingStatus, error) {
 	if a.store == nil {
 		return domain.OnboardingStatus{}, errors.New("store is not initialized")
@@ -995,7 +1004,7 @@ func (a *App) TelegramChatFolders() ([]domain.ChatFolder, error) {
 	}
 	folders := []domain.ChatFolder{
 		{ID: 0, Title: "All", ChatIDs: allIDs},
-		{ID: -1, Title: "Выбранные", Emoticon: "⭐", ChatIDs: selectedIDs},
+		{ID: 1_000_000_000, Title: "Выбранные", Emoticon: "⭐", ChatIDs: selectedIDs},
 	}
 
 	if a.telegramSvc == nil {

@@ -913,6 +913,59 @@ LIMIT ?
 	return out, rows.Err()
 }
 
+func (s *Store) EmbeddingsProgress(ctx context.Context) (domain.EmbeddingsProgress, error) {
+	var totalEligible int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM chunks c
+JOIN chats ch ON ch.chat_id = c.chat_id
+JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND c.deleted = 0
+  AND m.deleted = 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+`).Scan(&totalEligible); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
+	var embedded int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM chunks c
+JOIN chats ch ON ch.chat_id = c.chat_id
+JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
+JOIN embeddings e ON e.chunk_id = c.chunk_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND c.deleted = 0
+  AND m.deleted = 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+`).Scan(&embedded); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
+	var pending, running, failed int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT
+  SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending,
+  SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END) AS running,
+  SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
+FROM tasks
+WHERE type = 'embed_chunk'
+`).Scan(&pending, &running, &failed); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
+	return domain.EmbeddingsProgress{
+		TotalEligible: totalEligible,
+		Embedded:      embedded,
+		QueuePending:  pending,
+		QueueRunning:  running,
+		QueueFailed:   failed,
+	}, nil
+}
+
 func (s *Store) LoadChunkForEmbedding(ctx context.Context, chunkID int64) (EmbeddingCandidate, error) {
 	var item EmbeddingCandidate
 	err := s.db.QueryRowContext(ctx, `

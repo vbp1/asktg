@@ -16,6 +16,8 @@ export function DataDir():Promise<string>;
 
 export function EmbeddingsConfig():Promise<domain.EmbeddingsConfig>;
 
+export function EmbeddingsProgress():Promise<domain.EmbeddingsProgress>;
+
 export function ExitApp():Promise<void>;
 
 export function GetMessage(arg1:number,arg2:number):Promise<domain.Message>;

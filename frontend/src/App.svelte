@@ -31,6 +31,9 @@
   let embConfigured = false;
   let embTestBusy = false;
   let embTest = null;
+  let embProgress = null;
+  let embProgressBusy = false;
+  let embProgressTimer = null;
   let autostartEnabled = false;
   let backgroundPaused = false;
   let mcpPort = 0;
@@ -58,6 +61,10 @@
   $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
   $: dirtyCount = dirtyChatIds.length;
   $: semanticResultCount = (results || []).filter((r) => r && r.match_semantic).length;
+  $: embProgressPercent =
+    embProgress && embProgress.total_eligible > 0
+      ? Math.max(0, Math.min(100, Math.floor((embProgress.embedded / embProgress.total_eligible) * 100)))
+      : 0;
 
   function syncChatEditsFromChats(items) {
     const nextChatsById = {};
@@ -279,15 +286,22 @@
     try {
       chatFolders = await backend().TelegramChatFolders();
       if (!Array.isArray(chatFolders) || chatFolders.length === 0) {
-        chatFolders = [];
-        activeChatFolderId = 0;
-        return;
+        throw new Error("no folders");
       }
       if (!chatFolders.some((f) => f.id === activeChatFolderId)) {
         activeChatFolderId = chatFolders[0].id;
       }
-    } catch {
-      // Best-effort; "All" view still works.
+    } catch (error) {
+      // Best-effort: ensure at least "All" + "Выбранные" tabs exist even if Telegram folder API isn't available.
+      const allIDs = (chats || []).map((c) => c.chat_id);
+      const selectedIDs = (chats || []).filter((c) => c.enabled).map((c) => c.chat_id);
+      chatFolders = [
+        { id: 0, title: "All", chat_ids: allIDs },
+        { id: 1000000000, title: "Выбранные", emoticon: "⭐", chat_ids: selectedIDs },
+      ];
+      if (!chatFolders.some((f) => f.id === activeChatFolderId)) {
+        activeChatFolderId = 0;
+      }
     }
   }
 
@@ -312,6 +326,12 @@
 
   function openPage(page) {
     currentPage = page;
+    if (page === "settings") {
+      refreshEmbeddingsProgress();
+      startEmbeddingsProgressPolling();
+    } else {
+      stopEmbeddingsProgressPolling();
+    }
   }
 
   async function refreshEmbeddingsConfig() {
@@ -325,6 +345,47 @@
     } catch (error) {
       errorText = String(error);
     }
+  }
+
+  async function refreshEmbeddingsProgress() {
+    if (!backend()?.EmbeddingsProgress) {
+      return;
+    }
+    embProgressBusy = true;
+    try {
+      embProgress = await backend().EmbeddingsProgress();
+    } catch {
+      // ignore (progress is best-effort)
+    } finally {
+      embProgressBusy = false;
+    }
+  }
+
+  function embeddingsProgressDone(p) {
+    if (!p) return true;
+    if (p.queue_pending > 0 || p.queue_running > 0) return false;
+    if (p.total_eligible > 0 && p.embedded < p.total_eligible) return false;
+    return true;
+  }
+
+  function startEmbeddingsProgressPolling() {
+    if (embProgressTimer) return;
+    embProgressTimer = setInterval(async () => {
+      if (currentPage !== "settings") {
+        stopEmbeddingsProgressPolling();
+        return;
+      }
+      await refreshEmbeddingsProgress();
+      if (embeddingsProgressDone(embProgress)) {
+        stopEmbeddingsProgressPolling();
+      }
+    }, 2000);
+  }
+
+  function stopEmbeddingsProgressPolling() {
+    if (!embProgressTimer) return;
+    clearInterval(embProgressTimer);
+    embProgressTimer = null;
   }
 
   async function refreshAutostart() {
@@ -712,6 +773,8 @@
     try {
       infoText = await backend().RebuildSemanticIndex();
       await refreshStatus();
+      await refreshEmbeddingsProgress();
+      startEmbeddingsProgressPolling();
     } catch (error) {
       errorText = String(error);
     } finally {
@@ -900,10 +963,10 @@
         </div>
       {/if}
       <div class="row">
-        <button on:click={runSyncNow} disabled={syncBusy || telegramBusy}>
+        <button on:click={runSyncNow} disabled={syncBusy}>
           {syncBusy ? "Syncing..." : "Sync now"}
         </button>
-        <button on:click={toggleBackgroundPause} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={toggleBackgroundPause} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
         </button>
       </div>
@@ -921,10 +984,10 @@
       {/if}
       <div class="row wrap">
         <input bind:value={mcpPort} type="number" min="0" max="65535" placeholder="MCP port (0 = random free)" />
-        <button on:click={saveMCPPort} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={saveMCPPort} disabled={mcpBusy || maintenanceBusy}>
           {mcpBusy ? "Working..." : "Save MCP port"}
         </button>
-        <button on:click={toggleMCPEnabled} disabled={mcpBusy || maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={toggleMCPEnabled} disabled={mcpBusy || maintenanceBusy}>
           {mcpBusy ? "Working..." : (status && status.mcp_enabled ? "Disable MCP" : "Enable MCP")}
         </button>
         <button on:click={copyMCPEndpoint} disabled={!status || !status.mcp_endpoint}>
@@ -940,7 +1003,7 @@
         <span>Autostart: {autostartEnabled ? "enabled" : "disabled"}</span>
       </div>
       <div class="row">
-        <button on:click={toggleAutostart} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={toggleAutostart} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : (autostartEnabled ? "Disable autostart" : "Enable autostart")}
         </button>
       </div>
@@ -949,28 +1012,44 @@
         <input bind:value={embModel} placeholder="Model" />
         <input bind:value={embDims} type="number" min="1" max="8192" placeholder="Dims" />
         <input bind:value={embAPIKey} type="password" class="pathInput" placeholder="Embeddings API key (leave empty to keep current)" />
-        <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : "Save embeddings config"}
         </button>
-        <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy || telegramBusy || syncBusy || !embConfigured}>
+        <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy || !embConfigured}>
           {embTestBusy ? "Testing..." : "Test embeddings"}
         </button>
-        <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || !embConfigured}>
           {maintenanceBusy ? "Working..." : "Rebuild semantic index"}
         </button>
       </div>
+      {#if embProgress}
+        <div class="progressPanel">
+          <div class="progressHead">
+            <div class="mutedLine">
+              Semantic index: {embProgress.embedded}/{embProgress.total_eligible} ({embProgressPercent}%)
+              {embProgress.queue_running > 0 ? ` · running ${embProgress.queue_running}` : ""}
+              {embProgress.queue_pending > 0 ? ` · queued ${embProgress.queue_pending}` : ""}
+              {embProgress.queue_failed > 0 ? ` · failed ${embProgress.queue_failed}` : ""}
+            </div>
+            <button class="small" on:click={refreshEmbeddingsProgress} disabled={embProgressBusy || maintenanceBusy}>
+              {embProgressBusy ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+          <progress max="100" value={embProgressPercent}></progress>
+        </div>
+      {/if}
       <div class="row wrap">
         <input bind:value={backupPath} class="pathInput" placeholder="Backup path (.zip) or folder (optional)" />
-        <button on:click={createBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={createBackup} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : "Create backup"}
         </button>
       </div>
       <div class="row wrap">
         <input bind:value={restorePath} class="pathInput" placeholder="Restore from backup .zip path" />
-        <button on:click={restoreBackup} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button on:click={restoreBackup} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : "Restore backup"}
         </button>
-        <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy || telegramBusy || syncBusy}>
+        <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : "Purge all data"}
         </button>
       </div>
@@ -1074,7 +1153,7 @@
                 <input
                   type="checkbox"
                   checked={Boolean(chatEdits[chat.chat_id]?.enabled ?? chat.enabled)}
-                  disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                  disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                   on:change={(e) => setChatEdit(chat.chat_id, { enabled: e.currentTarget.checked })}
                 />
                 <span class="slider"></span>
@@ -1087,7 +1166,7 @@
                 <input
                   type="checkbox"
                   checked={Boolean(chatEdits[chat.chat_id]?.allow_embeddings ?? chat.allow_embeddings)}
-                  disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                  disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                   on:change={(e) => setChatEdit(chat.chat_id, { allow_embeddings: e.currentTarget.checked })}
                 />
                 <span class="slider"></span>
@@ -1096,8 +1175,14 @@
 
             <div class="enumField">
               <div class="enumMeta">
-                <span class="fieldLabel">History</span>
-                <span class="caption">Backfill indexes older messages. New only indexes just new messages.</span>
+                <div class="labelRow">
+                  <span class="fieldLabel">History</span>
+                  <span
+                    class="helpIcon"
+                    title="Backfill indexes older messages (more complete, may take longer). New only indexes just new incoming messages."
+                    >?</span
+                  >
+                </div>
               </div>
               <div class="pills">
                 <label
@@ -1109,7 +1194,7 @@
                     name={`hist-${chat.chat_id}`}
                     value="full"
                     checked={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "full"}
-                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                     on:change={() => setChatEdit(chat.chat_id, { history_mode: "full" })}
                   />
                   Backfill
@@ -1123,7 +1208,7 @@
                     name={`hist-${chat.chat_id}`}
                     value="lazy"
                     checked={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "lazy"}
-                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                     on:change={() => setChatEdit(chat.chat_id, { history_mode: "lazy" })}
                   />
                   New only
@@ -1133,8 +1218,14 @@
 
             <div class="enumField">
               <div class="enumMeta">
-                <span class="fieldLabel">URLs</span>
-                <span class="caption">Low indexes URLs with lower priority. High indexes more aggressively. Off disables URL indexing.</span>
+                <div class="labelRow">
+                  <span class="fieldLabel">URLs</span>
+                  <span
+                    class="helpIcon"
+                    title="Off disables URL indexing. Low indexes URLs with lower priority. High indexes more aggressively."
+                    >?</span
+                  >
+                </div>
               </div>
               <div class="pills">
                 <label class:active={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "off"} title="Off: do not index URLs.">
@@ -1143,7 +1234,7 @@
                     name={`urls-${chat.chat_id}`}
                     value="off"
                     checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "off"}
-                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                     on:change={() => setChatEdit(chat.chat_id, { urls_mode: "off" })}
                   />
                   Off
@@ -1157,7 +1248,7 @@
                     name={`urls-${chat.chat_id}`}
                     value="lazy"
                     checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "lazy"}
-                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                     on:change={() => setChatEdit(chat.chat_id, { urls_mode: "lazy" })}
                   />
                   Low
@@ -1171,7 +1262,7 @@
                     name={`urls-${chat.chat_id}`}
                     value="full"
                     checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "full"}
-                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
                     on:change={() => setChatEdit(chat.chat_id, { urls_mode: "full" })}
                   />
                   High
