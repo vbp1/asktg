@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -25,6 +28,7 @@ import (
 	"asktg/internal/domain"
 	"asktg/internal/embeddings"
 	"asktg/internal/mcpserver"
+	"asktg/internal/pdfextract"
 	"asktg/internal/security"
 	"asktg/internal/store/sqlite"
 	"asktg/internal/telegram"
@@ -41,6 +45,7 @@ const (
 	realtimeBurst         = 75 * time.Second
 	urlCandidateScanLimit = 40
 	urlTaskMaxAttempts    = 3
+	pdfTaskMaxAttempts    = 3
 	embedTaskMaxAttempts  = 4
 	embedCandidateLimit   = 60
 	backupFilenamePrefix  = "asktg-backup-"
@@ -102,6 +107,10 @@ type App struct {
 	realtimeWG           sync.WaitGroup
 	urlWG                sync.WaitGroup
 	embedWG              sync.WaitGroup
+	pdfWG                sync.WaitGroup
+
+	pdfBackfillMu      sync.Mutex
+	pdfBackfillRunning bool
 }
 
 // NewApp creates a new App application struct
@@ -310,7 +319,11 @@ func (a *App) rebuildVectorIndexFromStore(ctx context.Context, persist bool) err
 	if err != nil {
 		return err
 	}
-	items := make([]vector.Item, 0, len(records)+len(urlRecords))
+	fileRecords, err := a.store.ListFileEmbeddings(ctx, 0)
+	if err != nil {
+		return err
+	}
+	items := make([]vector.Item, 0, len(records)+len(urlRecords)+len(fileRecords))
 	for _, record := range records {
 		items = append(items, vector.Item{
 			ChunkID: record.ChunkID,
@@ -319,6 +332,16 @@ func (a *App) rebuildVectorIndexFromStore(ctx context.Context, persist bool) err
 	}
 	for _, record := range urlRecords {
 		nodeID := vectorNodeIDForURL(record.ChunkID)
+		if nodeID == 0 {
+			continue
+		}
+		items = append(items, vector.Item{
+			ChunkID: nodeID,
+			Vector:  record.Vector,
+		})
+	}
+	for _, record := range fileRecords {
+		nodeID := vectorNodeIDForFileDoc(record.ChunkID)
 		if nodeID == 0 {
 			continue
 		}
@@ -363,6 +386,12 @@ func (a *App) startWorkers() {
 		defer a.embedWG.Done()
 		a.runEmbeddingsLoop(loopCtx)
 	}()
+
+	a.pdfWG.Add(1)
+	go func() {
+		defer a.pdfWG.Done()
+		a.runPDFFetchLoop(loopCtx)
+	}()
 }
 
 func (a *App) stopWorkers() {
@@ -374,6 +403,7 @@ func (a *App) stopWorkers() {
 	a.realtimeWG.Wait()
 	a.urlWG.Wait()
 	a.embedWG.Wait()
+	a.pdfWG.Wait()
 	a.syncCancel = nil
 }
 
@@ -1225,6 +1255,7 @@ func filterSemanticCandidates(candidates []vector.Candidate, profile semanticPro
 func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchRequest, candidates []vector.Candidate) ([]domain.SearchResult, error) {
 	msgChunkIDs := make([]int64, 0, len(candidates))
 	urlIDs := make([]int64, 0, len(candidates))
+	fileDocIDs := make([]int64, 0, len(candidates))
 	distance := make(map[int64]float64, len(candidates))
 	for _, item := range candidates {
 		if item.ChunkID == 0 {
@@ -1232,12 +1263,17 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 		}
 		distance[item.ChunkID] = item.Distance
 		if item.ChunkID < 0 {
-			urlIDs = append(urlIDs, -item.ChunkID)
+			abs := -item.ChunkID
+			if abs > vectorFileDocOffset {
+				fileDocIDs = append(fileDocIDs, abs-vectorFileDocOffset)
+			} else {
+				urlIDs = append(urlIDs, abs)
+			}
 			continue
 		}
 		msgChunkIDs = append(msgChunkIDs, item.ChunkID)
 	}
-	if len(msgChunkIDs) == 0 && len(urlIDs) == 0 {
+	if len(msgChunkIDs) == 0 && len(urlIDs) == 0 && len(fileDocIDs) == 0 {
 		return nil, nil
 	}
 
@@ -1246,6 +1282,10 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 		return nil, err
 	}
 	lookupURLs, err := a.store.LookupURLDocResults(ctx, req, urlIDs)
+	if err != nil {
+		return nil, err
+	}
+	lookupFiles, err := a.store.LookupFileDocResults(ctx, req, fileDocIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1264,7 +1304,12 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 			ok   bool
 		)
 		if nodeID < 0 {
-			item, ok = lookupURLs[-nodeID]
+			abs := -nodeID
+			if abs > vectorFileDocOffset {
+				item, ok = lookupFiles[abs-vectorFileDocOffset]
+			} else {
+				item, ok = lookupURLs[abs]
+			}
 		} else {
 			item, ok = lookupChunks[nodeID]
 		}
@@ -1705,6 +1750,7 @@ func (a *App) RebuildSemanticIndex() string {
 		defer scanCancel()
 		a.enqueueEmbeddingCandidates(scanCtx)
 		a.enqueueURLEmbeddingCandidates(scanCtx)
+		a.enqueueFileEmbeddingCandidates(scanCtx)
 	}()
 	return fmt.Sprintf("Semantic index rebuild started at %s", time.Now().Format(time.RFC3339))
 }
@@ -1735,11 +1781,116 @@ func (a *App) runBackgroundSyncLoop(ctx context.Context) {
 			runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			_ = a.syncEnabledChats(runCtx, false)
 			cancel()
+			a.maybeStartPDFBackfill()
 		case <-ticker.C:
 			runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			_ = a.syncEnabledChats(runCtx, false)
 			cancel()
+			a.maybeStartPDFBackfill()
 		}
+	}
+}
+
+func (a *App) maybeStartPDFBackfill() {
+	if a.store == nil {
+		return
+	}
+	nowUnix := time.Now().Unix()
+
+	last, err := a.store.GetSettingInt(a.ctx, "pdf_backfill_last_unix", 0)
+	if err == nil && last > 0 && nowUnix-int64(last) < int64((24*time.Hour).Seconds()) {
+		return
+	}
+
+	a.pdfBackfillMu.Lock()
+	if a.pdfBackfillRunning {
+		a.pdfBackfillMu.Unlock()
+		return
+	}
+	a.pdfBackfillRunning = true
+	a.pdfBackfillMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.pdfBackfillMu.Lock()
+			a.pdfBackfillRunning = false
+			a.pdfBackfillMu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+		defer cancel()
+
+		sinceUnix := nowUnix - int64((30 * 24 * time.Hour).Seconds())
+		a.backfillPDFURLs(ctx, sinceUnix)
+		a.backfillTelegramPDFs(ctx, sinceUnix)
+
+		if err := a.store.SetSetting(context.Background(), "pdf_backfill_last_unix", strconv.FormatInt(nowUnix, 10)); err != nil {
+			runtime.LogWarningf(a.ctx, "PDF backfill timestamp update failed: %v", err)
+		}
+	}()
+}
+
+func (a *App) backfillPDFURLs(ctx context.Context, sinceUnix int64) {
+	if a.store == nil {
+		return
+	}
+	beforeTS := time.Now().Unix() + 1
+	beforeChatID := int64(1<<62 - 1)
+	beforeMsgID := int64(1<<62 - 1)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		candidates, err := a.store.ListPDFURLBackfillCandidates(ctx, sinceUnix, beforeTS, beforeChatID, beforeMsgID, 400)
+		if err != nil {
+			runtime.LogWarningf(a.ctx, "PDF URL backfill scan failed: %v", err)
+			return
+		}
+		if len(candidates) == 0 {
+			return
+		}
+		for _, candidate := range candidates {
+			urls := urlfetch.ExtractURLs(candidate.Text, security.DefaultMaxURLsMessage)
+			for _, rawURL := range urls {
+				if !looksLikePDFURL(rawURL) {
+					continue
+				}
+				if err := a.store.EnqueueURLTask(ctx, candidate.ChatID, candidate.MsgID, rawURL, 8); err != nil {
+					runtime.LogWarningf(a.ctx, "PDF URL backfill enqueue failed chat=%d msg=%d url=%s err=%v", candidate.ChatID, candidate.MsgID, rawURL, err)
+				}
+			}
+		}
+
+		last := candidates[len(candidates)-1]
+		beforeTS = last.Timestamp
+		beforeChatID = last.ChatID
+		beforeMsgID = last.MsgID
+	}
+}
+
+func (a *App) backfillTelegramPDFs(ctx context.Context, sinceUnix int64) {
+	if a.store == nil || a.telegramSvc == nil {
+		return
+	}
+	chatIDs, err := a.enabledChatIDs(ctx)
+	if err != nil || len(chatIDs) == 0 {
+		return
+	}
+
+	files, err := a.telegramSvc.BackfillPDFFilesSince(ctx, chatIDs, sinceUnix, 250)
+	if err != nil {
+		if errors.Is(err, telegram.ErrNotConfigured) || errors.Is(err, telegram.ErrUnauthorized) {
+			return
+		}
+		runtime.LogWarningf(a.ctx, "Telegram PDF backfill failed: %v", err)
+		return
+	}
+	if err := a.upsertFilesAndQueuePDFTasks(ctx, files); err != nil {
+		runtime.LogWarningf(a.ctx, "Telegram PDF backfill persist failed: %v", err)
 	}
 }
 
@@ -1770,7 +1921,7 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 		err = a.telegramSvc.RunRealtime(burstCtx, chatIDs, func(event telegram.LiveEvent) error {
 			switch event.Kind {
 			case telegram.LiveEventUpsert:
-				return a.upsertMessageAndQueueURLs(burstCtx, domain.Message{
+				if err := a.upsertMessageAndQueueURLs(burstCtx, domain.Message{
 					ChatID:        event.Message.ChatID,
 					MsgID:         event.Message.MsgID,
 					Timestamp:     event.Message.Timestamp,
@@ -1780,7 +1931,10 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 					Text:          event.Message.Text,
 					Deleted:       false,
 					HasURL:        event.Message.HasURL,
-				})
+				}); err != nil {
+					return err
+				}
+				return a.upsertFilesAndQueuePDFTasks(burstCtx, event.Files)
 			case telegram.LiveEventDelete:
 				if event.ChatID == 0 || event.MsgID == 0 {
 					return nil
@@ -1889,6 +2043,12 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 		}
 	}
 
+	if upsertErr := a.upsertFilesAndQueuePDFTasks(ctx, report.Files); upsertErr != nil {
+		_, progress, last := a.syncSnapshot()
+		a.setSyncStatus("error", progress, last)
+		return upsertErr
+	}
+
 	for _, item := range report.Chats {
 		if syncErr := a.store.UpdateChatSyncState(ctx, item.ChatID, item.NextCursor, item.LastMessageUnix, item.LastSyncedUnix); syncErr != nil {
 			_, progress, last := a.syncSnapshot()
@@ -1949,6 +2109,44 @@ func (a *App) enabledChatIDs(ctx context.Context) ([]int64, error) {
 	return chatIDs, nil
 }
 
+func (a *App) upsertFilesAndQueuePDFTasks(ctx context.Context, files []telegram.SyncedFile) error {
+	if a.store == nil {
+		return nil
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	nowUnix := time.Now().Unix()
+	for _, f := range files {
+		if f.ChatID == 0 || f.MsgID == 0 || f.DocumentID == 0 {
+			continue
+		}
+		if f.Size > int64(security.DefaultMaxPDFSizeBytes) && f.Size > 0 {
+			continue
+		}
+
+		if err := a.store.UpsertTGFile(ctx, sqlite.TGFile{
+			DocumentID:    f.DocumentID,
+			AccessHash:    f.AccessHash,
+			DCID:          f.DCID,
+			FileReference: f.FileReference,
+			Mime:          f.MimeType,
+			Size:          f.Size,
+			Filename:      f.FileName,
+			UpdatedAt:     nowUnix,
+		}); err != nil {
+			return err
+		}
+		if err := a.store.LinkMessageFile(ctx, f.ChatID, f.MsgID, f.DocumentID); err != nil {
+			return err
+		}
+		if err := a.store.EnqueuePDFTask(ctx, f.ChatID, f.MsgID, f.DocumentID, 9); err != nil {
+			runtime.LogWarningf(a.ctx, "PDF task enqueue failed chat=%d msg=%d doc=%d err=%v", f.ChatID, f.MsgID, f.DocumentID, err)
+		}
+	}
+	return nil
+}
+
 func (a *App) upsertMessageAndQueueURLs(ctx context.Context, message domain.Message) error {
 	oldChunkIDs, _ := a.store.ListChunkIDsByMessage(ctx, message.ChatID, message.MsgID)
 	if err := a.store.UpsertMessage(ctx, message); err != nil {
@@ -1976,16 +2174,27 @@ func (a *App) upsertMessageAndQueueURLs(ctx context.Context, message domain.Mess
 		return nil
 	}
 	mode := strings.ToLower(strings.TrimSpace(chat.URLsMode))
-	if mode == "" || mode == "off" {
-		return nil
-	}
 
 	priority := 10
 	if mode == "full" {
 		priority = 5
 	}
+	pdfPriority := priority
+	enqueueNonPDF := mode != "" && mode != "off"
+	if !enqueueNonPDF {
+		pdfPriority = 8
+	}
 	urls := urlfetch.ExtractURLs(message.Text, security.DefaultMaxURLsMessage)
 	for _, item := range urls {
+		if looksLikePDFURL(item) {
+			if err := a.store.EnqueueURLTask(ctx, message.ChatID, message.MsgID, item, pdfPriority); err != nil {
+				runtime.LogWarningf(a.ctx, "PDF URL enqueue failed chat=%d msg=%d url=%s err=%v", message.ChatID, message.MsgID, item, err)
+			}
+			continue
+		}
+		if !enqueueNonPDF {
+			continue
+		}
 		if err := a.store.EnqueueURLTask(ctx, message.ChatID, message.MsgID, item, priority); err != nil {
 			runtime.LogWarningf(a.ctx, "URL enqueue failed chat=%d msg=%d url=%s err=%v", message.ChatID, message.MsgID, item, err)
 		}
@@ -2097,8 +2306,14 @@ func (a *App) processURLTask(ctx context.Context, task sqlite.URLTask) error {
 		return nil
 	}
 	mode := strings.ToLower(strings.TrimSpace(chat.URLsMode))
-	if !chat.Enabled || mode == "" || mode == "off" {
+	if !chat.Enabled {
 		return nil
+	}
+	if mode == "" || mode == "off" {
+		// PDF URLs are always indexed, regardless of URLs mode.
+		if !looksLikePDFURL(task.URL) {
+			return nil
+		}
 	}
 
 	result, err := urlfetch.Fetch(ctx, task.URL)
@@ -2117,9 +2332,149 @@ func (a *App) processURLTask(ctx context.Context, task sqlite.URLTask) error {
 		result.FinalURL,
 		result.Title,
 		result.ExtractedText,
+		result.ContentType,
 		result.Hash,
 		time.Now().Unix(),
 	)
+}
+
+func (a *App) runPDFFetchLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		taskCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		task, ok, err := a.store.ClaimPDFTask(taskCtx, time.Now().Unix())
+		cancel()
+		if err != nil {
+			runtime.LogWarningf(a.ctx, "PDF task claim failed: %v", err)
+			if !sleepOrDone(ctx, 3*time.Second) {
+				return
+			}
+			continue
+		}
+		if !ok {
+			if !sleepOrDone(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+
+		processCtx, processCancel := context.WithTimeout(ctx, 60*time.Second)
+		processErr := a.processPDFTask(processCtx, task)
+		processCancel()
+		if processErr == nil {
+			if err := a.store.CompleteTask(ctx, task.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "PDF task complete failed id=%d err=%v", task.TaskID, err)
+			}
+			continue
+		}
+
+		if task.Attempts >= pdfTaskMaxAttempts {
+			if err := a.store.FailTask(ctx, task.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "PDF task fail mark failed id=%d err=%v", task.TaskID, err)
+			}
+			continue
+		}
+		backoff := int64(task.Attempts * 45)
+		if err := a.store.RetryTask(ctx, task.TaskID, time.Now().Unix()+backoff); err != nil {
+			runtime.LogWarningf(a.ctx, "PDF task retry failed id=%d err=%v", task.TaskID, err)
+		}
+	}
+}
+
+func (a *App) processPDFTask(ctx context.Context, task sqlite.PDFTask) error {
+	if a.store == nil || a.telegramSvc == nil {
+		return nil
+	}
+	if task.ChatID == 0 || task.MsgID == 0 || task.DocumentID == 0 {
+		return nil
+	}
+
+	message, err := a.store.GetMessage(ctx, task.ChatID, task.MsgID)
+	if err != nil || message.Deleted {
+		return nil
+	}
+	chat, err := a.store.GetChatPolicy(ctx, task.ChatID)
+	if err != nil || !chat.Enabled {
+		return nil
+	}
+
+	meta, err := a.store.GetTGFile(ctx, task.DocumentID)
+	if err != nil {
+		return nil
+	}
+	if meta.Size > int64(security.DefaultMaxPDFSizeBytes) && meta.Size > 0 {
+		runtime.LogWarningf(a.ctx, "PDF too large, skipping chat=%d msg=%d doc=%d size=%d", task.ChatID, task.MsgID, task.DocumentID, meta.Size)
+		return nil
+	}
+
+	pdfBytes, err := a.telegramSvc.DownloadDocumentBytes(ctx, meta.DocumentID, meta.AccessHash, meta.FileReference, int64(security.DefaultMaxPDFSizeBytes))
+	if err != nil {
+		if errors.Is(err, telegram.ErrFileReferenceExpired) {
+			refreshed, refreshErr := a.telegramSvc.FetchMessagePDFMeta(ctx, task.ChatID, task.MsgID)
+			if refreshErr == nil {
+				for _, f := range refreshed {
+					if f.DocumentID != task.DocumentID {
+						continue
+					}
+					_ = a.store.UpsertTGFile(ctx, sqlite.TGFile{
+						DocumentID:    f.DocumentID,
+						AccessHash:    f.AccessHash,
+						DCID:          f.DCID,
+						FileReference: f.FileReference,
+						Mime:          f.MimeType,
+						Size:          f.Size,
+						Filename:      f.FileName,
+						UpdatedAt:     time.Now().Unix(),
+					})
+					meta.AccessHash = f.AccessHash
+					meta.FileReference = f.FileReference
+					meta.DCID = f.DCID
+					meta.Mime = f.MimeType
+					meta.Size = f.Size
+					meta.Filename = f.FileName
+					break
+				}
+			}
+			pdfBytes, err = a.telegramSvc.DownloadDocumentBytes(ctx, meta.DocumentID, meta.AccessHash, meta.FileReference, int64(security.DefaultMaxPDFSizeBytes))
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	hashRaw := sha256.Sum256(pdfBytes)
+	hash := hex.EncodeToString(hashRaw[:])
+
+	extracted, extractErr := pdfextract.ExtractText(pdfBytes)
+	if extractErr != nil {
+		extracted = ""
+	}
+	if extracted != "" {
+		const maxRunes = 200000
+		runes := []rune(extracted)
+		if len(runes) > maxRunes {
+			extracted = string(runes[:maxRunes])
+		}
+	}
+
+	docID, err := a.store.UpsertFileDoc(ctx, task.ChatID, task.MsgID, task.DocumentID, meta.Filename, meta.Mime, meta.Size, extracted, hash, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	if docID == 0 || strings.TrimSpace(extracted) == "" {
+		return nil
+	}
+	if chat.AllowEmbeddings {
+		if err := a.store.EnqueueFileEmbeddingTask(ctx, task.ChatID, task.MsgID, docID, 10); err != nil {
+			runtime.LogWarningf(a.ctx, "File embedding enqueue failed doc_id=%d err=%v", docID, err)
+		}
+	}
+	return nil
 }
 
 func (a *App) runEmbeddingsLoop(ctx context.Context) {
@@ -2134,6 +2489,7 @@ func (a *App) runEmbeddingsLoop(ctx context.Context) {
 			scanCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			a.enqueueEmbeddingCandidates(scanCtx)
 			a.enqueueURLEmbeddingCandidates(scanCtx)
+			a.enqueueFileEmbeddingCandidates(scanCtx)
 			cancel()
 		default:
 		}
@@ -2221,6 +2577,22 @@ func (a *App) enqueueURLEmbeddingCandidates(ctx context.Context) {
 	}
 }
 
+func (a *App) enqueueFileEmbeddingCandidates(ctx context.Context) {
+	candidates, err := a.store.ListFileEmbeddingCandidates(ctx, embedCandidateLimit)
+	if err != nil {
+		runtime.LogWarningf(a.ctx, "File embedding candidate scan failed: %v", err)
+		return
+	}
+	for _, item := range candidates {
+		if strings.TrimSpace(item.Extracted) == "" {
+			continue
+		}
+		if err := a.store.EnqueueFileEmbeddingTask(ctx, item.ChatID, item.MsgID, item.DocID, 10); err != nil {
+			runtime.LogWarningf(a.ctx, "File embedding enqueue failed doc_id=%d err=%v", item.DocID, err)
+		}
+	}
+}
+
 func (a *App) processEmbeddingWork(ctx context.Context, client *embeddings.HTTPClient, work sqlite.EmbeddingWork) error {
 	switch strings.ToLower(strings.TrimSpace(work.Kind)) {
 	case "chunk":
@@ -2231,6 +2603,8 @@ func (a *App) processEmbeddingWork(ctx context.Context, client *embeddings.HTTPC
 		})
 	case "url":
 		return a.processURLEmbeddingTask(ctx, client, work.URLID)
+	case "file":
+		return a.processFileEmbeddingTask(ctx, client, work.FileDocID)
 	default:
 		return nil
 	}
@@ -2321,11 +2695,58 @@ func (a *App) processURLEmbeddingTask(ctx context.Context, client *embeddings.HT
 	return nil
 }
 
+func (a *App) processFileEmbeddingTask(ctx context.Context, client *embeddings.HTTPClient, docID int64) error {
+	if docID == 0 {
+		return nil
+	}
+	doc, err := a.store.LoadFileDocForEmbedding(ctx, docID)
+	if err != nil {
+		return nil
+	}
+
+	text := buildFileEmbeddingText(doc)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+
+	vectors, err := client.Embed(ctx, []string{text})
+	if err != nil {
+		return err
+	}
+	if len(vectors) == 0 || len(vectors[0]) == 0 {
+		return errors.New("empty embedding vector")
+	}
+	model, _ := a.store.GetSetting(ctx, "embeddings_model", "text-embedding-3-large")
+	if err := a.store.UpsertFileEmbedding(ctx, docID, model, vectors[0], time.Now().Unix()); err != nil {
+		return err
+	}
+	if a.vectorIndex != nil {
+		nodeID := vectorNodeIDForFileDoc(docID)
+		if err := a.vectorIndex.Add(nodeID, vectors[0]); err != nil {
+			runtime.LogWarningf(a.ctx, "vector add failed file_doc_id=%d err=%v", docID, err)
+			return nil
+		}
+		if err := a.vectorIndex.Save(a.vectorGraphPath()); err != nil {
+			runtime.LogWarningf(a.ctx, "vector graph save failed: %v", err)
+		}
+	}
+	return nil
+}
+
 func vectorNodeIDForURL(urlID int64) int64 {
 	if urlID == 0 {
 		return 0
 	}
 	return -urlID
+}
+
+const vectorFileDocOffset int64 = 1_000_000_000_000
+
+func vectorNodeIDForFileDoc(docID int64) int64 {
+	if docID <= 0 {
+		return 0
+	}
+	return -(vectorFileDocOffset + docID)
 }
 
 func buildURLEmbeddingText(doc sqlite.URLEmbeddingCandidate) string {
@@ -2348,6 +2769,35 @@ func buildURLEmbeddingText(doc sqlite.URLEmbeddingCandidate) string {
 	}
 	b.WriteString(extracted)
 	return strings.TrimSpace(b.String())
+}
+
+func buildFileEmbeddingText(doc sqlite.FileEmbeddingCandidate) string {
+	var b strings.Builder
+	name := strings.TrimSpace(doc.Filename)
+	if name != "" {
+		b.WriteString(name)
+		b.WriteString("\n")
+	}
+	extracted := strings.TrimSpace(doc.Extracted)
+	if extracted == "" {
+		return strings.TrimSpace(b.String())
+	}
+
+	const maxRunes = 8000
+	runes := []rune(extracted)
+	if len(runes) > maxRunes {
+		extracted = string(runes[:maxRunes])
+	}
+	b.WriteString(extracted)
+	return strings.TrimSpace(b.String())
+}
+
+func looksLikePDFURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(path.Ext(parsed.Path), ".pdf")
 }
 
 func isMostlyURLMessage(text string) bool {

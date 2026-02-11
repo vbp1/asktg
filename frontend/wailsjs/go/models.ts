@@ -206,6 +206,11 @@ export namespace domain {
 	    url?: string;
 	    url_final?: string;
 	    url_title?: string;
+	    url_mime?: string;
+	    file_name?: string;
+	    file_mime?: string;
+	    file_size?: number;
+	    file_doc_id?: number;
 	    score: number;
 	    deep_link?: string;
 	    match_fts?: boolean;
@@ -228,6 +233,11 @@ export namespace domain {
 	        this.url = source["url"];
 	        this.url_final = source["url_final"];
 	        this.url_title = source["url_title"];
+	        this.url_mime = source["url_mime"];
+	        this.file_name = source["file_name"];
+	        this.file_mime = source["file_mime"];
+	        this.file_size = source["file_size"];
+	        this.file_doc_id = source["file_doc_id"];
 	        this.score = source["score"];
 	        this.deep_link = source["deep_link"];
 	        this.match_fts = source["match_fts"];

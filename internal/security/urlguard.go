@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	DefaultFetchTimeout   = 10 * time.Second
-	DefaultMaxSizeBytes   = 5 * 1024 * 1024
-	DefaultMaxRedirects   = 5
-	DefaultMaxURLsMessage = 5
+	DefaultFetchTimeout    = 10 * time.Second
+	DefaultMaxSizeBytes    = 5 * 1024 * 1024
+	DefaultMaxPDFSizeBytes = 20 * 1024 * 1024
+	DefaultMaxRedirects    = 5
+	DefaultMaxURLsMessage  = 5
 )
 
 func ValidateFetchURL(raw string) error {

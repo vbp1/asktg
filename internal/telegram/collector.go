@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -64,6 +65,19 @@ type SyncedMessage struct {
 	HasURL        bool
 }
 
+type SyncedFile struct {
+	ChatID        int64
+	MsgID         int64
+	Timestamp     int64
+	DocumentID    int64
+	AccessHash    int64
+	FileReference []byte
+	DCID          int
+	FileName      string
+	MimeType      string
+	Size          int64
+}
+
 type ChatSyncResult struct {
 	ChatID          int64
 	NextCursor      string
@@ -77,6 +91,7 @@ type SyncReport struct {
 	SyncedAtUnix int64
 	Chats        []ChatSyncResult
 	Messages     []SyncedMessage
+	Files        []SyncedFile
 }
 
 type LiveEventKind string
@@ -89,6 +104,7 @@ const (
 type LiveEvent struct {
 	Kind    LiveEventKind
 	Message SyncedMessage
+	Files   []SyncedFile
 	ChatID  int64
 	MsgID   int64
 }
@@ -272,6 +288,7 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 		SyncedAtUnix: time.Now().Unix(),
 		Chats:        make([]ChatSyncResult, 0, len(chats)),
 		Messages:     make([]SyncedMessage, 0, len(chats)*historyBatchSize),
+		Files:        make([]SyncedFile, 0, len(chats)),
 	}
 	if len(chats) == 0 {
 		return report, nil
@@ -313,12 +330,13 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 				continue
 			}
 
-			result, syncedMessages, syncErr := syncSingleChat(runCtx, client.API(), resolved, state, maxPerChat)
+			result, syncedMessages, syncedFiles, syncErr := syncSingleChat(runCtx, client.API(), resolved, state, maxPerChat)
 			if syncErr != nil {
 				return syncErr
 			}
 			report.Chats = append(report.Chats, result)
 			report.Messages = append(report.Messages, syncedMessages...)
+			report.Files = append(report.Files, syncedFiles...)
 		}
 		return nil
 	})
@@ -364,10 +382,12 @@ func (s *Service) RunRealtime(ctx context.Context, chatIDs []int64, onEvent func
 		}
 
 		synced := toSyncedMessage(chatID, msg, buildEntityLookupFromUpdate(entities))
+		files := extractSyncedPDFFiles(chatID, msg)
 		registerKnownMessage(knownMsgChats, synced.MsgID, chatID)
 		return onEvent(LiveEvent{
 			Kind:    LiveEventUpsert,
 			Message: synced,
+			Files:   files,
 			ChatID:  synced.ChatID,
 			MsgID:   synced.MsgID,
 		})
@@ -481,7 +501,7 @@ func collectDialogLookup(ctx context.Context, client *tdtelegram.Client) (map[in
 	return lookup, nil
 }
 
-func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, state SyncChatState, maxPerChat int) (ChatSyncResult, []SyncedMessage, error) {
+func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, state SyncChatState, maxPerChat int) (ChatSyncResult, []SyncedMessage, []SyncedFile, error) {
 	lastSyncedUnix := time.Now().Unix()
 	result := ChatSyncResult{
 		ChatID:          state.ChatID,
@@ -494,6 +514,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 
 	remaining := maxPerChat
 	messages := make([]SyncedMessage, 0, minInt(historyBatchSize, maxPerChat))
+	files := make([]SyncedFile, 0, minInt(historyBatchSize, maxPerChat))
 	lastKnown := state.LastMessageUnix
 	tailMinID := 0
 	hitKnown := false
@@ -511,7 +532,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 			Hash:       0,
 		})
 		if pageErr != nil {
-			return result, nil, pageErr
+			return result, nil, nil, pageErr
 		}
 		modified, ok := page.AsModified()
 		if !ok {
@@ -540,6 +561,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 
 			synced := toSyncedMessage(dialog.dialog.ChatID, msg, entities)
 			messages = append(messages, synced)
+			files = append(files, extractSyncedPDFFiles(dialog.dialog.ChatID, msg)...)
 			result.Upserted++
 			if synced.Timestamp > result.LastMessageUnix {
 				result.LastMessageUnix = synced.Timestamp
@@ -572,7 +594,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 	if !hasCursor {
 		result.NextCursor = ""
 		result.BackfillDone = true
-		return result, messages, nil
+		return result, messages, files, nil
 	}
 
 	result.BackfillDone = false
@@ -588,20 +610,20 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 			Hash:       0,
 		})
 		if pageErr != nil {
-			return result, nil, pageErr
+			return result, nil, nil, pageErr
 		}
 		modified, ok := page.AsModified()
 		if !ok {
 			result.NextCursor = ""
 			result.BackfillDone = true
-			return result, messages, nil
+			return result, messages, files, nil
 		}
 
 		pageMessages := modified.GetMessages()
 		if len(pageMessages) == 0 {
 			result.NextCursor = ""
 			result.BackfillDone = true
-			return result, messages, nil
+			return result, messages, files, nil
 		}
 		entities := buildEntityLookup(modified.GetUsers(), modified.GetChats())
 
@@ -617,6 +639,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 
 			synced := toSyncedMessage(dialog.dialog.ChatID, msg, entities)
 			messages = append(messages, synced)
+			files = append(files, extractSyncedPDFFiles(dialog.dialog.ChatID, msg)...)
 			result.Upserted++
 			if synced.Timestamp > result.LastMessageUnix {
 				result.LastMessageUnix = synced.Timestamp
@@ -631,19 +654,19 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 		if pageMinID <= 0 || pageMinID == backfillOffset {
 			result.NextCursor = ""
 			result.BackfillDone = true
-			return result, messages, nil
+			return result, messages, files, nil
 		}
 
 		if len(pageMessages) < historyBatchSize {
 			result.NextCursor = ""
 			result.BackfillDone = true
-			return result, messages, nil
+			return result, messages, files, nil
 		}
 		backfillOffset = pageMinID
 	}
 
 	result.NextCursor = strconv.Itoa(backfillOffset)
-	return result, messages, nil
+	return result, messages, files, nil
 }
 
 type entityLookup struct {
@@ -731,6 +754,62 @@ func resolveSender(msg *tg.Message, entities entityLookup) (int64, string) {
 
 func containsURL(text string) bool {
 	return urlPattern.MatchString(text)
+}
+
+func extractSyncedPDFFiles(chatID int64, msg *tg.Message) []SyncedFile {
+	if msg == nil || msg.Media == nil {
+		return nil
+	}
+	media, ok := msg.Media.(*tg.MessageMediaDocument)
+	if !ok || media == nil || media.Document == nil {
+		return nil
+	}
+	doc, ok := media.Document.(*tg.Document)
+	if !ok || doc == nil {
+		return nil
+	}
+
+	filename := documentFilename(doc.Attributes)
+	mime := strings.TrimSpace(doc.MimeType)
+	if !looksLikePDFDocument(filename, mime) {
+		return nil
+	}
+
+	return []SyncedFile{{
+		ChatID:        chatID,
+		MsgID:         int64(msg.ID),
+		Timestamp:     int64(msg.Date),
+		DocumentID:    doc.ID,
+		AccessHash:    doc.AccessHash,
+		FileReference: doc.FileReference,
+		DCID:          doc.DCID,
+		FileName:      strings.TrimSpace(filename),
+		MimeType:      mime,
+		Size:          doc.Size,
+	}}
+}
+
+func looksLikePDFDocument(filename, mime string) bool {
+	if strings.EqualFold(strings.TrimSpace(mime), "application/pdf") {
+		return true
+	}
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return false
+	}
+	return strings.EqualFold(path.Ext(filename), ".pdf")
+}
+
+func documentFilename(attrs []tg.DocumentAttributeClass) string {
+	for _, attr := range attrs {
+		if attr == nil {
+			continue
+		}
+		if named, ok := attr.(*tg.DocumentAttributeFilename); ok && named != nil {
+			return named.FileName
+		}
+	}
+	return ""
 }
 
 func peerToChatID(peer tg.PeerClass) (int64, bool) {

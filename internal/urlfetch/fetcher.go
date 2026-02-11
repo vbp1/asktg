@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 
+	"asktg/internal/pdfextract"
 	"asktg/internal/security"
 
 	"github.com/PuerkitoBio/goquery"
@@ -27,6 +29,7 @@ type Result struct {
 	FinalURL      string
 	Title         string
 	ExtractedText string
+	ContentType   string
 	Hash          string
 }
 
@@ -62,6 +65,7 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 		return Result{}, errors.Join(ErrURLBlocked, err)
 	}
 
+	assumePDF := looksLikePDFURL(rawURL)
 	client := &http.Client{
 		Timeout: security.DefaultFetchTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -80,7 +84,7 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 		return Result{}, err
 	}
 	req.Header.Set("User-Agent", "asktg-url-fetch/0.1")
-	req.Header.Set("Accept", "text/html, text/plain;q=0.9, */*;q=0.5")
+	req.Header.Set("Accept", "application/pdf, text/html, text/plain;q=0.9, */*;q=0.5")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -95,19 +99,24 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 		return Result{}, errors.Join(ErrURLBlocked, err)
 	}
 
-	reader := io.LimitReader(resp.Body, security.DefaultMaxSizeBytes+1)
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	isPDF := strings.Contains(contentType, "application/pdf") || strings.Contains(contentType, "application/x-pdf") || assumePDF
+
+	limit := int64(security.DefaultMaxSizeBytes)
+	if isPDF {
+		limit = int64(security.DefaultMaxPDFSizeBytes)
+	}
+	reader := io.LimitReader(resp.Body, limit+1)
 	body, err := io.ReadAll(reader)
 	if err != nil {
 		return Result{}, err
 	}
-	if int64(len(body)) > security.DefaultMaxSizeBytes {
+	if int64(len(body)) > limit {
 		return Result{}, ErrFetchTooLarge
 	}
 
 	finalURL := normalizeURL(resp.Request.URL)
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-
-	title, extracted := extractContent(body, contentType)
+	title, extracted := extractContent(body, contentType, finalURL, isPDF)
 	if extracted == "" {
 		extracted = title
 	}
@@ -119,11 +128,27 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 		FinalURL:      finalURL,
 		Title:         title,
 		ExtractedText: extracted,
+		ContentType:   strings.TrimSpace(resp.Header.Get("Content-Type")),
 		Hash:          hex.EncodeToString(hashRaw[:]),
 	}, nil
 }
 
-func extractContent(body []byte, contentType string) (string, string) {
+func extractContent(body []byte, contentType string, finalURL string, isPDF bool) (string, string) {
+	if isPDF {
+		text, err := pdfextract.ExtractText(body)
+		if err != nil {
+			// Fallback to empty text; caller will keep Title if present.
+			return inferTitleFromURL(finalURL), ""
+		}
+		// Keep it bounded for storage and downstream embedding.
+		const maxRunes = 200000
+		runes := []rune(text)
+		if len(runes) > maxRunes {
+			text = string(runes[:maxRunes])
+		}
+		return inferTitleFromURL(finalURL), text
+	}
+
 	rawBody := string(body)
 	looksHTML := strings.Contains(contentType, "text/html") ||
 		strings.Contains(contentType, "application/xhtml") ||
@@ -163,6 +188,27 @@ func extractContent(body []byte, contentType string) (string, string) {
 
 func normalizeSpace(value string) string {
 	return strings.TrimSpace(spaceNormalize.ReplaceAllString(value, " "))
+}
+
+func looksLikePDFURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	return ext == ".pdf"
+}
+
+func inferTitleFromURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	base := path.Base(parsed.Path)
+	if base == "." || base == "/" {
+		return ""
+	}
+	return base
 }
 
 func normalizeURL(parsed *url.URL) string {

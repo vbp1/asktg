@@ -49,6 +49,11 @@ type SearchResult struct {
 	URL           string  `json:"url,omitempty"`
 	URLFinal      string  `json:"url_final,omitempty"`
 	URLTitle      string  `json:"url_title,omitempty"`
+	URLMime       string  `json:"url_mime,omitempty"`
+	FileName      string  `json:"file_name,omitempty"`
+	FileMime      string  `json:"file_mime,omitempty"`
+	FileSize      int64   `json:"file_size,omitempty"`
+	FileDocID     int64   `json:"file_doc_id,omitempty"`
 	Score         float64 `json:"score"`
 	DeepLink      string  `json:"deep_link,omitempty"`
 	MatchFTS      bool    `json:"match_fts,omitempty"`

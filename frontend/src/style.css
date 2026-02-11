@@ -641,6 +641,22 @@ button:disabled {
   color: var(--text);
 }
 
+.badge.pdf {
+  border-color: rgba(87, 96, 106, 0.35);
+  background: rgba(175, 184, 193, 0.24);
+  color: var(--text);
+}
+
+.fileName {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .resultHead small,
 .sender {
   color: var(--muted);

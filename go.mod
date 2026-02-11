@@ -1,12 +1,13 @@
 module asktg
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/Bithack/go-hnsw v0.0.0-20170629124716-52a932462077
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/getlantern/systray v1.2.2
 	github.com/gotd/td v0.134.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/modelcontextprotocol/go-sdk v1.2.0
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/sys v0.38.0

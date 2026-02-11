@@ -272,6 +272,18 @@
     return out;
   }
 
+  function isPDFMime(mime) {
+    const m = String(mime || "").toLowerCase();
+    return m.includes("application/pdf") || m.includes("application/x-pdf");
+  }
+
+  function isPDFURLResult(result) {
+    if (!result || result.source_type !== "url") return false;
+    if (isPDFMime(result.url_mime)) return true;
+    const u = String(result.url_final || result.url || "").toLowerCase();
+    return u.includes(".pdf");
+  }
+
   function saveThemePreference(preference) {
     themePreference = preference;
     try {
@@ -1028,13 +1040,29 @@
           <div class="resultHead">
             <div class="resultTitle">
               <strong>{result.chat_title}</strong>
+              {#if result.source_type === "file"}
+                <span class="badge pdf">PDF</span>
+                {#if result.file_name}
+                  <span class="fileName" title={result.file_name}>{result.file_name}</span>
+                {/if}
+              {:else if isPDFURLResult(result)}
+                <span class="badge pdf">PDF</span>
+                {#if result.url_title}
+                  <span class="fileName" title={result.url_title}>{result.url_title}</span>
+                {/if}
+              {/if}
               {#if result.match_semantic}
                 <span class="badge semantic">Semantic</span>
               {/if}
             </div>
             <small>{new Date(result.timestamp * 1000).toLocaleString()}</small>
           </div>
-          {#if result.source_type === "url"}
+          {#if result.source_type === "file"}
+            <div class="status">
+              <span>Matched in PDF</span>
+              <span>{result.file_name || "PDF attachment"}</span>
+            </div>
+          {:else if result.source_type === "url"}
             <div class="status">
               <span>Matched in URL page</span>
               <span>{result.url_title || "Untitled page"}</span>

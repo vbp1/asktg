@@ -40,6 +40,32 @@ type URLCandidateMessage struct {
 	URLsMode string
 }
 
+type PDFURLBackfillCandidate struct {
+	ChatID    int64
+	MsgID     int64
+	Timestamp int64
+	Text      string
+}
+
+type PDFTask struct {
+	TaskID     int64
+	ChatID     int64
+	MsgID      int64
+	DocumentID int64
+	Attempts   int
+}
+
+type TGFile struct {
+	DocumentID    int64
+	AccessHash    int64
+	DCID          int
+	FileReference []byte
+	Mime          string
+	Size          int64
+	Filename      string
+	UpdatedAt     int64
+}
+
 type EmbeddingTask struct {
 	TaskID   int64
 	ChunkID  int64
@@ -161,6 +187,7 @@ CREATE TABLE IF NOT EXISTS url_docs (
 	final_url TEXT NOT NULL DEFAULT '',
 	title TEXT NOT NULL DEFAULT '',
 	extracted_text TEXT NOT NULL DEFAULT '',
+	content_type TEXT NOT NULL DEFAULT '',
 	hash TEXT NOT NULL DEFAULT '',
 	fetched_at INTEGER NOT NULL DEFAULT 0
 );
@@ -172,6 +199,60 @@ CREATE TABLE IF NOT EXISTS url_embeddings (
 	vec BLOB NOT NULL,
 	created_at INTEGER NOT NULL,
 	FOREIGN KEY (url_id) REFERENCES url_docs(url_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS tg_files (
+	document_id INTEGER PRIMARY KEY,
+	access_hash INTEGER NOT NULL DEFAULT 0,
+	dc_id INTEGER NOT NULL DEFAULT 0,
+	file_reference BLOB NOT NULL DEFAULT x'',
+	mime TEXT NOT NULL DEFAULT '',
+	size INTEGER NOT NULL DEFAULT 0,
+	filename TEXT NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS message_files (
+	chat_id INTEGER NOT NULL,
+	msg_id INTEGER NOT NULL,
+	document_id INTEGER NOT NULL,
+	PRIMARY KEY (chat_id, msg_id, document_id),
+	FOREIGN KEY (chat_id, msg_id) REFERENCES messages(chat_id, msg_id) ON DELETE CASCADE,
+	FOREIGN KEY (document_id) REFERENCES tg_files(document_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS file_docs (
+	doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+	document_id INTEGER NOT NULL,
+	chat_id INTEGER NOT NULL,
+	msg_id INTEGER NOT NULL,
+	filename TEXT NOT NULL DEFAULT '',
+	mime TEXT NOT NULL DEFAULT '',
+	size INTEGER NOT NULL DEFAULT 0,
+	extracted_text TEXT NOT NULL DEFAULT '',
+	hash TEXT NOT NULL DEFAULT '',
+	parsed_at INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(chat_id, msg_id, document_id),
+	FOREIGN KEY (chat_id, msg_id) REFERENCES messages(chat_id, msg_id) ON DELETE CASCADE,
+	FOREIGN KEY (document_id) REFERENCES tg_files(document_id) ON DELETE CASCADE
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_file_docs USING fts5(
+	text,
+	chat_id UNINDEXED,
+	msg_id UNINDEXED,
+	doc_id UNINDEXED,
+	filename UNINDEXED,
+	tokenize = 'unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS file_embeddings (
+	doc_id INTEGER PRIMARY KEY,
+	model TEXT NOT NULL,
+	dims INTEGER NOT NULL,
+	vec BLOB NOT NULL,
+	created_at INTEGER NOT NULL,
+	FOREIGN KEY (doc_id) REFERENCES file_docs(doc_id) ON DELETE CASCADE
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_url_docs_unique ON url_docs(chat_id, msg_id, url);
@@ -204,6 +285,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_state_next ON tasks(type, state, next_run_a
 	if err := s.ensureChatsEmbeddingsSinceColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureURLDocsContentTypeColumn(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -221,6 +305,16 @@ WHERE allow_embeddings = 1
   AND embeddings_since_unix = 0
 `)
 	return err
+}
+
+func (s *Store) ensureURLDocsContentTypeColumn(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE url_docs ADD COLUMN content_type TEXT NOT NULL DEFAULT ''`); err != nil {
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "duplicate column name") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
@@ -665,6 +759,19 @@ DELETE FROM fts_url_docs WHERE rowid IN (
 	if _, err = tx.ExecContext(ctx, `DELETE FROM url_docs WHERE chat_id = ? AND msg_id = ?`, chatID, msgID); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM fts_file_docs WHERE rowid IN (
+	SELECT doc_id FROM file_docs WHERE chat_id = ? AND msg_id = ?
+)
+`, chatID, msgID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_docs WHERE chat_id = ? AND msg_id = ?`, chatID, msgID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM message_files WHERE chat_id = ? AND msg_id = ?`, chatID, msgID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -698,6 +805,31 @@ WHERE rowid IN (
 	if _, err = tx.ExecContext(ctx, `DELETE FROM url_docs WHERE chat_id = ?`, chatID); err != nil {
 		return err
 	}
+
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM fts_file_docs
+WHERE rowid IN (
+	SELECT doc_id FROM file_docs WHERE chat_id = ?
+)
+`, chatID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_docs WHERE chat_id = ?`, chatID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM message_files WHERE chat_id = ?`, chatID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM tg_files
+WHERE document_id NOT IN (
+	SELECT DISTINCT document_id FROM message_files
+	UNION
+	SELECT DISTINCT document_id FROM file_docs
+)
+`); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `
 DELETE FROM fts_chunks
 WHERE rowid IN (
@@ -715,6 +847,20 @@ WHERE rowid IN (
 	if _, err = tx.ExecContext(ctx, `
 DELETE FROM tasks
 WHERE type = 'url_fetch'
+  AND payload LIKE ?
+`, "%\"chat_id\":"+strconv.FormatInt(chatID, 10)+",%"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM tasks
+WHERE type = 'pdf_fetch_tg'
+  AND payload LIKE ?
+`, "%\"chat_id\":"+strconv.FormatInt(chatID, 10)+",%"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM tasks
+WHERE type = 'embed_file'
   AND payload LIKE ?
 `, "%\"chat_id\":"+strconv.FormatInt(chatID, 10)+",%"); err != nil {
 		return err
@@ -742,6 +888,21 @@ func (s *Store) PurgeAllData(ctx context.Context) error {
 	}()
 
 	if _, err = tx.ExecContext(ctx, `DELETE FROM embeddings`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_embeddings`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM fts_file_docs`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_docs`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM message_files`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM tg_files`); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM fts_url_docs`); err != nil {
@@ -785,10 +946,16 @@ func (s *Store) ResetEmbeddings(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, `DELETE FROM url_embeddings`); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_embeddings`); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE type = 'embed_chunk'`); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE type = 'embed_url'`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE type = 'embed_file'`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -820,6 +987,12 @@ type embeddingTaskPayload struct {
 
 type urlEmbeddingTaskPayload struct {
 	URLID int64 `json:"url_id"`
+}
+
+type fileEmbeddingTaskPayload struct {
+	ChatID int64 `json:"chat_id"`
+	MsgID  int64 `json:"msg_id"`
+	DocID  int64 `json:"doc_id"`
 }
 
 func (s *Store) EnqueueEmbeddingTask(ctx context.Context, chunkID int64, priority int) error {
@@ -884,12 +1057,44 @@ VALUES('embed_url', ?, 'pending', 0, ?, ?, ?)
 	return err
 }
 
+func (s *Store) EnqueueFileEmbeddingTask(ctx context.Context, chatID int64, msgID int64, docID int64, priority int) error {
+	if chatID == 0 || msgID == 0 || docID == 0 {
+		return errors.New("invalid file embedding task payload")
+	}
+	payload := fileEmbeddingTaskPayload{ChatID: chatID, MsgID: msgID, DocID: docID}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM tasks
+WHERE type = 'embed_file'
+  AND payload = ?
+LIMIT 1
+`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	nowUnix := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
+VALUES('embed_file', ?, 'pending', 0, ?, ?, ?)
+`, string(encoded), nowUnix, priority, nowUnix)
+	return err
+}
+
 type EmbeddingWork struct {
-	TaskID   int64
-	Kind     string
-	ChunkID  int64
-	URLID    int64
-	Attempts int
+	TaskID    int64
+	Kind      string
+	ChunkID   int64
+	URLID     int64
+	FileDocID int64
+	Attempts  int
 }
 
 func (s *Store) ClaimEmbeddingWork(ctx context.Context, nowUnix int64) (EmbeddingWork, bool, error) {
@@ -912,7 +1117,7 @@ func (s *Store) ClaimEmbeddingWork(ctx context.Context, nowUnix int64) (Embeddin
 	err = tx.QueryRowContext(ctx, `
 SELECT task_id, type, payload, attempts
 FROM tasks
-WHERE type IN ('embed_chunk','embed_url')
+WHERE type IN ('embed_chunk','embed_url','embed_file')
   AND state = 'pending'
   AND next_run_at <= ?
 ORDER BY priority ASC, created_at ASC
@@ -953,6 +1158,13 @@ WHERE task_id = ?
 		}
 		work.Kind = "url"
 		work.URLID = decoded.URLID
+	case "embed_file":
+		var decoded fileEmbeddingTaskPayload
+		if decodeErr := json.Unmarshal([]byte(payload), &decoded); decodeErr != nil {
+			return EmbeddingWork{}, false, decodeErr
+		}
+		work.Kind = "file"
+		work.FileDocID = decoded.DocID
 	default:
 		return EmbeddingWork{}, false, fmt.Errorf("unknown embedding task type: %s", taskType)
 	}
@@ -1020,16 +1232,35 @@ WHERE ch.enabled = 1
 	var totalURLEligible int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(1)
-FROM url_docs d
+	FROM url_docs d
+	JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+	JOIN chats ch ON ch.chat_id = d.chat_id
+	WHERE ch.enabled = 1
+	  AND ch.allow_embeddings = 1
+	  AND (
+	    ch.urls_mode IN ('lazy','full')
+	    OR lower(d.content_type) LIKE '%application/pdf%'
+	    OR lower(d.url) LIKE '%.pdf%'
+	  )
+	  AND m.deleted = 0
+	  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+	  AND length(trim(d.extracted_text)) > 0
+`).Scan(&totalURLEligible); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
+	var totalFileEligible int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM file_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
 WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
-  AND ch.urls_mode IN ('lazy','full')
   AND m.deleted = 0
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
   AND length(trim(d.extracted_text)) > 0
-`).Scan(&totalURLEligible); err != nil {
+`).Scan(&totalFileEligible); err != nil {
 		return domain.EmbeddingsProgress{}, err
 	}
 
@@ -1054,17 +1285,37 @@ WHERE ch.enabled = 1
 	var embeddedURLs int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(1)
-FROM url_docs d
-JOIN url_embeddings e ON e.url_id = d.url_id
+	FROM url_docs d
+	JOIN url_embeddings e ON e.url_id = d.url_id
+	JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+	JOIN chats ch ON ch.chat_id = d.chat_id
+	WHERE ch.enabled = 1
+	  AND ch.allow_embeddings = 1
+	  AND (
+	    ch.urls_mode IN ('lazy','full')
+	    OR lower(d.content_type) LIKE '%application/pdf%'
+	    OR lower(d.url) LIKE '%.pdf%'
+	  )
+	  AND m.deleted = 0
+	  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+	  AND length(trim(d.extracted_text)) > 0
+`).Scan(&embeddedURLs); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
+	var embeddedFiles int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM file_docs d
+JOIN file_embeddings e ON e.doc_id = d.doc_id
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
 WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
-  AND ch.urls_mode IN ('lazy','full')
   AND m.deleted = 0
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
   AND length(trim(d.extracted_text)) > 0
-`).Scan(&embeddedURLs); err != nil {
+`).Scan(&embeddedFiles); err != nil {
 		return domain.EmbeddingsProgress{}, err
 	}
 
@@ -1075,14 +1326,14 @@ SELECT
   SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END) AS running,
   SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
 FROM tasks
-WHERE type IN ('embed_chunk','embed_url')
+WHERE type IN ('embed_chunk','embed_url','embed_file')
 `).Scan(&pending, &running, &failed); err != nil {
 		return domain.EmbeddingsProgress{}, err
 	}
 
 	return domain.EmbeddingsProgress{
-		TotalEligible: totalEligible + totalURLEligible,
-		Embedded:      embedded + embeddedURLs,
+		TotalEligible: totalEligible + totalURLEligible + totalFileEligible,
+		Embedded:      embedded + embeddedURLs + embeddedFiles,
 		QueuePending:  pending,
 		QueueRunning:  running,
 		QueueFailed:   failed,
@@ -1221,14 +1472,18 @@ SELECT d.url_id, d.chat_id, d.msg_id, d.url, d.title, d.extracted_text, m.ts
 FROM url_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
-LEFT JOIN url_embeddings e ON e.url_id = d.url_id
-WHERE ch.enabled = 1
-  AND ch.allow_embeddings = 1
-  AND ch.urls_mode IN ('lazy','full')
-  AND m.deleted = 0
-  AND e.url_id IS NULL
-  AND length(trim(d.extracted_text)) > 0
-  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+ LEFT JOIN url_embeddings e ON e.url_id = d.url_id
+ WHERE ch.enabled = 1
+   AND ch.allow_embeddings = 1
+  AND (
+    ch.urls_mode IN ('lazy','full')
+    OR lower(d.content_type) LIKE '%application/pdf%'
+    OR lower(d.url) LIKE '%.pdf%'
+  )
+   AND m.deleted = 0
+   AND e.url_id IS NULL
+   AND length(trim(d.extracted_text)) > 0
+   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 ORDER BY m.ts DESC
 LIMIT ?
 `, limit)
@@ -1255,13 +1510,17 @@ SELECT d.url_id, d.chat_id, d.msg_id, d.url, d.title, d.extracted_text, m.ts
 FROM url_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
-WHERE d.url_id = ?
-  AND ch.enabled = 1
-  AND ch.allow_embeddings = 1
-  AND ch.urls_mode IN ('lazy','full')
-  AND m.deleted = 0
-  AND length(trim(d.extracted_text)) > 0
-  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+ WHERE d.url_id = ?
+   AND ch.enabled = 1
+   AND ch.allow_embeddings = 1
+  AND (
+    ch.urls_mode IN ('lazy','full')
+    OR lower(d.content_type) LIKE '%application/pdf%'
+    OR lower(d.url) LIKE '%.pdf%'
+  )
+   AND m.deleted = 0
+   AND length(trim(d.extracted_text)) > 0
+   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `, urlID).Scan(&item.URLID, &item.ChatID, &item.MsgID, &item.URL, &item.Title, &item.Extracted, &item.MessageTS)
 	if err != nil {
 		return URLEmbeddingCandidate{}, err
@@ -1296,12 +1555,16 @@ FROM url_embeddings e
 JOIN url_docs d ON d.url_id = e.url_id
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
-WHERE m.deleted = 0
-  AND ch.enabled = 1
-  AND ch.allow_embeddings = 1
-  AND ch.urls_mode IN ('lazy','full')
-  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
-  AND length(trim(d.extracted_text)) > 0
+ WHERE m.deleted = 0
+   AND ch.enabled = 1
+   AND ch.allow_embeddings = 1
+  AND (
+    ch.urls_mode IN ('lazy','full')
+    OR lower(d.content_type) LIKE '%application/pdf%'
+    OR lower(d.url) LIKE '%.pdf%'
+  )
+   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+   AND length(trim(d.extracted_text)) > 0
 ORDER BY e.url_id ASC
 `
 	args := make([]any, 0, 1)
@@ -1337,6 +1600,239 @@ ORDER BY e.url_id ASC
 	return records, rows.Err()
 }
 
+type FileEmbeddingCandidate struct {
+	DocID     int64
+	ChatID    int64
+	MsgID     int64
+	Filename  string
+	Mime      string
+	Extracted string
+	MessageTS int64
+}
+
+func (s *Store) ListFileEmbeddingCandidates(ctx context.Context, limit int) ([]FileEmbeddingCandidate, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT d.doc_id, d.chat_id, d.msg_id, d.filename, d.mime, d.extracted_text, m.ts
+FROM file_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+LEFT JOIN file_embeddings e ON e.doc_id = d.doc_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND m.deleted = 0
+  AND e.doc_id IS NULL
+  AND length(trim(d.extracted_text)) > 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+ORDER BY m.ts DESC
+LIMIT ?
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]FileEmbeddingCandidate, 0, limit)
+	for rows.Next() {
+		var item FileEmbeddingCandidate
+		if err := rows.Scan(&item.DocID, &item.ChatID, &item.MsgID, &item.Filename, &item.Mime, &item.Extracted, &item.MessageTS); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LoadFileDocForEmbedding(ctx context.Context, docID int64) (FileEmbeddingCandidate, error) {
+	if docID == 0 {
+		return FileEmbeddingCandidate{}, errors.New("doc id is required")
+	}
+	var item FileEmbeddingCandidate
+	err := s.db.QueryRowContext(ctx, `
+SELECT d.doc_id, d.chat_id, d.msg_id, d.filename, d.mime, d.extracted_text, m.ts
+FROM file_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE d.doc_id = ?
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND m.deleted = 0
+  AND length(trim(d.extracted_text)) > 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+`, docID).Scan(&item.DocID, &item.ChatID, &item.MsgID, &item.Filename, &item.Mime, &item.Extracted, &item.MessageTS)
+	if err != nil {
+		return FileEmbeddingCandidate{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) UpsertFileEmbedding(ctx context.Context, docID int64, model string, vector []float32, createdAt int64) error {
+	if docID == 0 {
+		return errors.New("doc id is required")
+	}
+	if len(vector) == 0 {
+		return errors.New("embedding vector is empty")
+	}
+	blob := encodeFloat32Slice(vector)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO file_embeddings(doc_id, model, dims, vec, created_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(doc_id) DO UPDATE SET
+	model = excluded.model,
+	dims = excluded.dims,
+	vec = excluded.vec,
+	created_at = excluded.created_at
+`, docID, strings.TrimSpace(model), len(vector), blob, createdAt)
+	return err
+}
+
+func (s *Store) ListFileEmbeddings(ctx context.Context, limit int) ([]EmbeddingRecord, error) {
+	query := `
+SELECT e.doc_id, e.vec
+FROM file_embeddings e
+JOIN file_docs d ON d.doc_id = e.doc_id
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE m.deleted = 0
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+  AND length(trim(d.extracted_text)) > 0
+ORDER BY e.doc_id ASC
+`
+	args := make([]any, 0, 1)
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]EmbeddingRecord, 0, 256)
+	for rows.Next() {
+		var (
+			id   int64
+			blob []byte
+		)
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, err
+		}
+		vector := decodeFloat32Slice(blob)
+		if len(vector) == 0 {
+			continue
+		}
+		records = append(records, EmbeddingRecord{
+			ChunkID: id,
+			Vector:  vector,
+		})
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) LookupFileDocResults(ctx context.Context, req domain.SearchRequest, docIDs []int64) (map[int64]domain.SearchResult, error) {
+	if len(docIDs) == 0 {
+		return map[int64]domain.SearchResult{}, nil
+	}
+
+	query := `
+SELECT
+	d.doc_id,
+	d.chat_id,
+	d.msg_id,
+	m.ts,
+	ch.title,
+	m.sender_display,
+	m.text,
+	d.filename,
+	d.mime,
+	d.size
+FROM file_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE d.doc_id IN (
+`
+	args := make([]any, 0, len(docIDs)+8)
+	for idx, id := range docIDs {
+		if idx > 0 {
+			query += ","
+		}
+		query += "?"
+		args = append(args, id)
+	}
+	query += `
+)
+  AND m.deleted = 0
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+`
+
+	if req.Filters.FromUnix > 0 {
+		query += " AND m.ts >= ?"
+		args = append(args, req.Filters.FromUnix)
+	}
+	if req.Filters.ToUnix > 0 {
+		query += " AND m.ts <= ?"
+		args = append(args, req.Filters.ToUnix)
+	}
+	if req.Filters.HasURL != nil {
+		query += " AND m.has_url = ?"
+		args = append(args, boolToInt(*req.Filters.HasURL))
+	}
+	if len(req.Filters.ChatIDs) > 0 {
+		query += " AND d.chat_id IN ("
+		for idx, id := range req.Filters.ChatIDs {
+			if idx > 0 {
+				query += ","
+			}
+			query += "?"
+			args = append(args, id)
+		}
+		query += ")"
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make(map[int64]domain.SearchResult, len(docIDs))
+	for rows.Next() {
+		var (
+			docID int64
+			item  domain.SearchResult
+		)
+		if err := rows.Scan(
+			&docID,
+			&item.ChatID,
+			&item.MsgID,
+			&item.Timestamp,
+			&item.ChatTitle,
+			&item.Sender,
+			&item.MessageText,
+			&item.FileName,
+			&item.FileMime,
+			&item.FileSize,
+		); err != nil {
+			return nil, err
+		}
+		item.SourceType = "file"
+		item.FileDocID = docID
+		if strings.TrimSpace(item.FileName) != "" {
+			item.Snippet = item.FileName
+		} else {
+			item.Snippet = item.MessageText
+		}
+		results[docID] = item
+	}
+	return results, rows.Err()
+}
+
 func (s *Store) LookupURLDocResults(ctx context.Context, req domain.SearchRequest, urlIDs []int64) (map[int64]domain.SearchResult, error) {
 	if len(urlIDs) == 0 {
 		return map[int64]domain.SearchResult{}, nil
@@ -1353,7 +1849,8 @@ SELECT
 	m.text,
 	d.url,
 	d.final_url,
-	d.title
+	d.title,
+	d.content_type
 FROM url_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
@@ -1421,6 +1918,7 @@ WHERE d.url_id IN (
 			&item.URL,
 			&item.URLFinal,
 			&item.URLTitle,
+			&item.URLMime,
 		); err != nil {
 			return nil, err
 		}
@@ -1702,6 +2200,151 @@ WHERE task_id = ?
 	}, true, nil
 }
 
+func (s *Store) UpsertTGFile(ctx context.Context, file TGFile) error {
+	if file.DocumentID == 0 {
+		return errors.New("document id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO tg_files(document_id, access_hash, dc_id, file_reference, mime, size, filename, updated_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(document_id) DO UPDATE SET
+	access_hash = excluded.access_hash,
+	dc_id = excluded.dc_id,
+	file_reference = excluded.file_reference,
+	mime = excluded.mime,
+	size = excluded.size,
+	filename = excluded.filename,
+	updated_at = excluded.updated_at
+`, file.DocumentID, file.AccessHash, file.DCID, file.FileReference, strings.TrimSpace(file.Mime), file.Size, strings.TrimSpace(file.Filename), file.UpdatedAt)
+	return err
+}
+
+func (s *Store) GetTGFile(ctx context.Context, documentID int64) (TGFile, error) {
+	var out TGFile
+	if documentID == 0 {
+		return TGFile{}, errors.New("document id is required")
+	}
+	err := s.db.QueryRowContext(ctx, `
+SELECT document_id, access_hash, dc_id, file_reference, mime, size, filename, updated_at
+FROM tg_files
+WHERE document_id = ?
+`, documentID).Scan(&out.DocumentID, &out.AccessHash, &out.DCID, &out.FileReference, &out.Mime, &out.Size, &out.Filename, &out.UpdatedAt)
+	if err != nil {
+		return TGFile{}, err
+	}
+	return out, nil
+}
+
+func (s *Store) LinkMessageFile(ctx context.Context, chatID int64, msgID int64, documentID int64) error {
+	if chatID == 0 || msgID == 0 || documentID == 0 {
+		return errors.New("invalid message file link")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO message_files(chat_id, msg_id, document_id)
+VALUES(?, ?, ?)
+`, chatID, msgID, documentID)
+	return err
+}
+
+type pdfTaskPayload struct {
+	ChatID     int64 `json:"chat_id"`
+	MsgID      int64 `json:"msg_id"`
+	DocumentID int64 `json:"document_id"`
+}
+
+func (s *Store) EnqueuePDFTask(ctx context.Context, chatID int64, msgID int64, documentID int64, priority int) error {
+	if chatID == 0 || msgID == 0 || documentID == 0 {
+		return errors.New("invalid pdf task payload")
+	}
+	payload := pdfTaskPayload{
+		ChatID:     chatID,
+		MsgID:      msgID,
+		DocumentID: documentID,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM tasks
+WHERE type = 'pdf_fetch_tg'
+  AND payload = ?
+LIMIT 1
+`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	nowUnix := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
+VALUES('pdf_fetch_tg', ?, 'pending', 0, ?, ?, ?)
+`, string(encoded), nowUnix, priority, nowUnix)
+	return err
+}
+
+func (s *Store) ClaimPDFTask(ctx context.Context, nowUnix int64) (PDFTask, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PDFTask{}, false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var (
+		taskID   int64
+		payload  string
+		attempts int
+	)
+	err = tx.QueryRowContext(ctx, `
+SELECT task_id, payload, attempts
+FROM tasks
+WHERE type = 'pdf_fetch_tg'
+  AND state = 'pending'
+  AND next_run_at <= ?
+ORDER BY priority ASC, created_at ASC
+LIMIT 1
+`, nowUnix).Scan(&taskID, &payload, &attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return PDFTask{}, false, nil
+	}
+	if err != nil {
+		return PDFTask{}, false, err
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'running', attempts = attempts + 1
+WHERE task_id = ?
+`, taskID); err != nil {
+		return PDFTask{}, false, err
+	}
+
+	var decoded pdfTaskPayload
+	if decodeErr := json.Unmarshal([]byte(payload), &decoded); decodeErr != nil {
+		return PDFTask{}, false, decodeErr
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return PDFTask{}, false, commitErr
+	}
+
+	return PDFTask{
+		TaskID:     taskID,
+		ChatID:     decoded.ChatID,
+		MsgID:      decoded.MsgID,
+		DocumentID: decoded.DocumentID,
+		Attempts:   attempts + 1,
+	}, true, nil
+}
+
 func (s *Store) CompleteTask(ctx context.Context, taskID int64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET state = 'done' WHERE task_id = ?`, taskID)
 	return err
@@ -1721,7 +2364,7 @@ func (s *Store) FailTask(ctx context.Context, taskID int64) error {
 	return err
 }
 
-func (s *Store) UpsertURLDoc(ctx context.Context, chatID int64, msgID int64, rawURL, finalURL, title, extractedText, hash string, fetchedAt int64) error {
+func (s *Store) UpsertURLDoc(ctx context.Context, chatID int64, msgID int64, rawURL, finalURL, title, extractedText, contentType, hash string, fetchedAt int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1733,15 +2376,16 @@ func (s *Store) UpsertURLDoc(ctx context.Context, chatID int64, msgID int64, raw
 	}()
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO url_docs(chat_id, msg_id, url, final_url, title, extracted_text, hash, fetched_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO url_docs(chat_id, msg_id, url, final_url, title, extracted_text, content_type, hash, fetched_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id, msg_id, url) DO UPDATE SET
 	final_url = excluded.final_url,
 	title = excluded.title,
 	extracted_text = excluded.extracted_text,
+	content_type = excluded.content_type,
 	hash = excluded.hash,
 	fetched_at = excluded.fetched_at
-`, chatID, msgID, rawURL, finalURL, title, extractedText, hash, fetchedAt)
+`, chatID, msgID, rawURL, finalURL, title, extractedText, strings.TrimSpace(contentType), hash, fetchedAt)
 	if err != nil {
 		return err
 	}
@@ -1768,6 +2412,139 @@ VALUES(?, ?, ?, ?, ?)
 	}
 
 	return tx.Commit()
+}
+
+func (s *Store) UpsertFileDoc(ctx context.Context, chatID int64, msgID int64, documentID int64, filename, mime string, size int64, extractedText string, hash string, parsedAt int64) (int64, error) {
+	if chatID == 0 || msgID == 0 || documentID == 0 {
+		return 0, errors.New("invalid file doc key")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO file_docs(document_id, chat_id, msg_id, filename, mime, size, extracted_text, hash, parsed_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(chat_id, msg_id, document_id) DO UPDATE SET
+	filename = excluded.filename,
+	mime = excluded.mime,
+	size = excluded.size,
+	extracted_text = excluded.extracted_text,
+	hash = excluded.hash,
+	parsed_at = excluded.parsed_at
+`, documentID, chatID, msgID, strings.TrimSpace(filename), strings.TrimSpace(mime), size, extractedText, strings.TrimSpace(hash), parsedAt)
+	if err != nil {
+		return 0, err
+	}
+
+	var docID int64
+	if err = tx.QueryRowContext(ctx, `
+SELECT doc_id
+FROM file_docs
+WHERE chat_id = ? AND msg_id = ? AND document_id = ?
+`, chatID, msgID, documentID).Scan(&docID); err != nil {
+		return 0, err
+	}
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM fts_file_docs WHERE rowid = ?`, docID); err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(extractedText) != "" {
+		if _, err = tx.ExecContext(ctx, `
+INSERT INTO fts_file_docs(rowid, text, chat_id, msg_id, doc_id, filename)
+VALUES(?, ?, ?, ?, ?, ?)
+`, docID, extractedText, chatID, msgID, docID, strings.TrimSpace(filename)); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return docID, nil
+}
+
+func (s *Store) DeleteFileDocsByMessage(ctx context.Context, chatID int64, msgID int64) error {
+	if chatID == 0 || msgID == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, `
+DELETE FROM fts_file_docs WHERE rowid IN (
+	SELECT doc_id FROM file_docs WHERE chat_id = ? AND msg_id = ?
+)
+`, chatID, msgID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM file_docs WHERE chat_id = ? AND msg_id = ?`, chatID, msgID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListPDFURLBackfillCandidates(ctx context.Context, sinceUnix int64, beforeTS int64, beforeChatID int64, beforeMsgID int64, limit int) ([]PDFURLBackfillCandidate, error) {
+	if sinceUnix <= 0 {
+		return nil, errors.New("sinceUnix must be > 0")
+	}
+	if beforeTS <= 0 {
+		beforeTS = time.Now().Unix() + 1
+		beforeChatID = 1<<62 - 1
+		beforeMsgID = 1<<62 - 1
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT m.chat_id, m.msg_id, m.ts, m.text
+FROM messages m
+JOIN chats c ON c.chat_id = m.chat_id
+WHERE c.enabled = 1
+  AND m.deleted = 0
+  AND m.has_url = 1
+  AND m.ts >= ?
+  AND (
+    m.ts < ?
+    OR (
+      m.ts = ?
+      AND (
+        m.chat_id < ?
+        OR (m.chat_id = ? AND m.msg_id < ?)
+      )
+    )
+  )
+ORDER BY m.ts DESC, m.chat_id DESC, m.msg_id DESC
+LIMIT ?
+`, sinceUnix, beforeTS, beforeTS, beforeChatID, beforeChatID, beforeMsgID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PDFURLBackfillCandidate, 0, limit)
+	for rows.Next() {
+		var item PDFURLBackfillCandidate
+		if err := rows.Scan(&item.ChatID, &item.MsgID, &item.Timestamp, &item.Text); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListURLQueueCandidates(ctx context.Context, limit int) ([]URLCandidateMessage, error) {
@@ -1893,6 +2670,7 @@ SELECT
 	d.url,
 	d.final_url,
 	d.title,
+	d.content_type,
 	COALESCE(snippet(fts_url_docs, 0, '<mark>', '</mark>', '...', 18), m.text) AS snippet,
 	bm25(fts_url_docs) AS rank
 FROM fts_url_docs
@@ -1941,6 +2719,7 @@ WHERE fts_url_docs MATCH ?
 				&item.URL,
 				&item.URLFinal,
 				&item.URLTitle,
+				&item.URLMime,
 				&item.Snippet,
 				&item.Score,
 			); err != nil {
@@ -1955,6 +2734,90 @@ WHERE fts_url_docs MATCH ?
 		if err := urlRows.Err(); err != nil {
 			return nil, err
 		}
+	}
+
+	fileQuery := `
+SELECT
+	fts_file_docs.chat_id,
+	fts_file_docs.msg_id,
+	m.ts,
+	c.title,
+	m.sender_display,
+	m.text,
+	d.doc_id,
+	d.filename,
+	d.mime,
+	d.size,
+	COALESCE(snippet(fts_file_docs, 0, '<mark>', '</mark>', '...', 18), m.text) AS snippet,
+	bm25(fts_file_docs) AS rank
+FROM fts_file_docs
+JOIN messages m ON m.chat_id = fts_file_docs.chat_id AND m.msg_id = fts_file_docs.msg_id
+JOIN chats c ON c.chat_id = fts_file_docs.chat_id
+JOIN file_docs d ON d.doc_id = fts_file_docs.rowid
+WHERE fts_file_docs MATCH ?
+  AND m.deleted = 0
+  AND c.enabled = 1
+`
+	fileArgs := []any{match}
+	if req.Filters.FromUnix > 0 {
+		fileQuery += " AND m.ts >= ?"
+		fileArgs = append(fileArgs, req.Filters.FromUnix)
+	}
+	if req.Filters.ToUnix > 0 {
+		fileQuery += " AND m.ts <= ?"
+		fileArgs = append(fileArgs, req.Filters.ToUnix)
+	}
+	if req.Filters.HasURL != nil {
+		fileQuery += " AND m.has_url = ?"
+		fileArgs = append(fileArgs, boolToInt(*req.Filters.HasURL))
+	}
+	if len(req.Filters.ChatIDs) > 0 {
+		placeholders := make([]string, 0, len(req.Filters.ChatIDs))
+		for _, id := range req.Filters.ChatIDs {
+			placeholders = append(placeholders, "?")
+			fileArgs = append(fileArgs, id)
+		}
+		fileQuery += " AND m.chat_id IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	fileQuery += " ORDER BY rank ASC, m.ts DESC LIMIT ?"
+	fileArgs = append(fileArgs, limit)
+
+	fileRows, queryErr := s.db.QueryContext(ctx, fileQuery, fileArgs...)
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	defer fileRows.Close()
+
+	for fileRows.Next() {
+		var (
+			item      domain.SearchResult
+			fileDocID int64
+		)
+		if err := fileRows.Scan(
+			&item.ChatID,
+			&item.MsgID,
+			&item.Timestamp,
+			&item.ChatTitle,
+			&item.Sender,
+			&item.MessageText,
+			&fileDocID,
+			&item.FileName,
+			&item.FileMime,
+			&item.FileSize,
+			&item.Snippet,
+			&item.Score,
+		); err != nil {
+			return nil, err
+		}
+		item.SourceType = "file"
+		item.FileDocID = fileDocID
+		if req.Mode == domain.SearchModeHybrid {
+			item.Score = item.Score * 0.9
+		}
+		mergeSearchResult(merged, item)
+	}
+	if err := fileRows.Err(); err != nil {
+		return nil, err
 	}
 
 	results := make([]domain.SearchResult, 0, len(merged))
@@ -2008,6 +2871,21 @@ func mergeSearchFields(target domain.SearchResult, source domain.SearchResult) d
 	}
 	if target.URLTitle == "" {
 		target.URLTitle = source.URLTitle
+	}
+	if target.URLMime == "" {
+		target.URLMime = source.URLMime
+	}
+	if target.FileName == "" {
+		target.FileName = source.FileName
+	}
+	if target.FileMime == "" {
+		target.FileMime = source.FileMime
+	}
+	if target.FileSize <= 0 {
+		target.FileSize = source.FileSize
+	}
+	if target.FileDocID == 0 {
+		target.FileDocID = source.FileDocID
 	}
 	return target
 }
