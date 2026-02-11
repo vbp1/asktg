@@ -55,11 +55,16 @@
   let applyAllBusy = false;
   let applyAllDone = 0;
   let applyAllTotal = 0;
+  let chatFilter = "";
 
   $: onboardingIncomplete = Boolean(onboarding && !onboarding.completed);
   $: searchLocked = Boolean(onboarding && onboarding.enabled_chats < 1);
   $: activeChatFolder = chatFolders.find((f) => f.id === activeChatFolderId) || chatFolders[0] || null;
-  $: visibleChats = chatsForFolder(chats, activeChatFolder);
+  $: visibleChatsInFolder = chatsForFolder(chats, activeChatFolder);
+  $: visibleChats =
+    (chatFilter || "").trim() === ""
+      ? visibleChatsInFolder
+      : visibleChatsInFolder.filter((c) => (c?.title || "").toLocaleLowerCase().includes(chatFilter.trim().toLocaleLowerCase()));
   $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
   $: dirtyCount = dirtyChatIds.length;
   $: semanticResultCount = (results || []).filter((r) => r && r.match_semantic).length;
@@ -1177,6 +1182,13 @@
       <div class="chatToolbar">
         <div class="mutedLine">Unsaved changes: {dirtyCount}</div>
         <div class="row wrap">
+          <input
+            class="chatFilterInput"
+            type="search"
+            bind:value={chatFilter}
+            placeholder="Filter chats by name..."
+            title="Type to filter chats in this folder by chat name."
+          />
           <button class="small" on:click={discardAllChatEdits} disabled={dirtyCount === 0 || applyAllBusy}>
             Discard
           </button>
@@ -1190,7 +1202,9 @@
       </p>
 
       {#if visibleChats.length === 0}
-        <div class="empty">No chats in this folder.</div>
+        <div class="empty">
+          {(chatFilter || "").trim() ? "No chats match the filter in this folder." : "No chats in this folder."}
+        </div>
       {/if}
 
       <div class="chatList">

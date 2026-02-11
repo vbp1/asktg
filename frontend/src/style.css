@@ -322,6 +322,21 @@ button:disabled {
   background: var(--surface2);
 }
 
+.chatFilterInput {
+  height: var(--control-h);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  min-width: 240px;
+}
+
+.chatFilterInput:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
 .folderTabs {
   display: flex;
   gap: 0;
