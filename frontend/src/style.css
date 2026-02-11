@@ -361,10 +361,10 @@ button:disabled {
 }
 
 .switchWrap {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-start;
+  gap: 8px;
   min-width: 150px;
 }
 
@@ -437,6 +437,8 @@ button:disabled {
   gap: 2px;
   flex: 1 1 200px;
   min-width: 200px;
+  text-align: right;
+  justify-items: end;
 }
 
 .caption {
