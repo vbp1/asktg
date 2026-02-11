@@ -306,10 +306,24 @@ func (a *App) rebuildVectorIndexFromStore(ctx context.Context, persist bool) err
 	if err != nil {
 		return err
 	}
-	items := make([]vector.Item, 0, len(records))
+	urlRecords, err := a.store.ListURLEmbeddings(ctx, 0)
+	if err != nil {
+		return err
+	}
+	items := make([]vector.Item, 0, len(records)+len(urlRecords))
 	for _, record := range records {
 		items = append(items, vector.Item{
 			ChunkID: record.ChunkID,
+			Vector:  record.Vector,
+		})
+	}
+	for _, record := range urlRecords {
+		nodeID := vectorNodeIDForURL(record.ChunkID)
+		if nodeID == 0 {
+			continue
+		}
+		items = append(items, vector.Item{
+			ChunkID: nodeID,
 			Vector:  record.Vector,
 		})
 	}
@@ -1209,20 +1223,29 @@ func filterSemanticCandidates(candidates []vector.Candidate, profile semanticPro
 }
 
 func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchRequest, candidates []vector.Candidate) ([]domain.SearchResult, error) {
-	chunkIDs := make([]int64, 0, len(candidates))
+	msgChunkIDs := make([]int64, 0, len(candidates))
+	urlIDs := make([]int64, 0, len(candidates))
 	distance := make(map[int64]float64, len(candidates))
 	for _, item := range candidates {
-		if item.ChunkID <= 0 {
+		if item.ChunkID == 0 {
 			continue
 		}
-		chunkIDs = append(chunkIDs, item.ChunkID)
 		distance[item.ChunkID] = item.Distance
+		if item.ChunkID < 0 {
+			urlIDs = append(urlIDs, -item.ChunkID)
+			continue
+		}
+		msgChunkIDs = append(msgChunkIDs, item.ChunkID)
 	}
-	if len(chunkIDs) == 0 {
+	if len(msgChunkIDs) == 0 && len(urlIDs) == 0 {
 		return nil, nil
 	}
 
-	lookup, err := a.store.LookupChunkResults(ctx, req, chunkIDs)
+	lookupChunks, err := a.store.LookupChunkResults(ctx, req, msgChunkIDs)
+	if err != nil {
+		return nil, err
+	}
+	lookupURLs, err := a.store.LookupURLDocResults(ctx, req, urlIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1232,11 +1255,23 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 	}
 	results := make([]domain.SearchResult, 0, limit)
 	for _, candidate := range candidates {
-		item, ok := lookup[candidate.ChunkID]
+		nodeID := candidate.ChunkID
+		if nodeID == 0 {
+			continue
+		}
+		var (
+			item domain.SearchResult
+			ok   bool
+		)
+		if nodeID < 0 {
+			item, ok = lookupURLs[-nodeID]
+		} else {
+			item, ok = lookupChunks[nodeID]
+		}
 		if !ok {
 			continue
 		}
-		item.Score = distance[candidate.ChunkID]
+		item.Score = distance[nodeID]
 		item.MatchSemantic = true
 		results = append(results, item)
 		if len(results) >= limit {
@@ -1669,6 +1704,7 @@ func (a *App) RebuildSemanticIndex() string {
 		scanCtx, scanCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer scanCancel()
 		a.enqueueEmbeddingCandidates(scanCtx)
+		a.enqueueURLEmbeddingCandidates(scanCtx)
 	}()
 	return fmt.Sprintf("Semantic index rebuild started at %s", time.Now().Format(time.RFC3339))
 }
@@ -2097,6 +2133,7 @@ func (a *App) runEmbeddingsLoop(ctx context.Context) {
 		case <-scanTicker.C:
 			scanCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			a.enqueueEmbeddingCandidates(scanCtx)
+			a.enqueueURLEmbeddingCandidates(scanCtx)
 			cancel()
 		default:
 		}
@@ -2110,7 +2147,7 @@ func (a *App) runEmbeddingsLoop(ctx context.Context) {
 		}
 
 		taskCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		task, ok, err := a.store.ClaimEmbeddingTask(taskCtx, time.Now().Unix())
+		work, ok, err := a.store.ClaimEmbeddingWork(taskCtx, time.Now().Unix())
 		cancel()
 		if err != nil {
 			runtime.LogWarningf(a.ctx, "Embedding task claim failed: %v", err)
@@ -2127,24 +2164,24 @@ func (a *App) runEmbeddingsLoop(ctx context.Context) {
 		}
 
 		processCtx, processCancel := context.WithTimeout(ctx, 45*time.Second)
-		processErr := a.processEmbeddingTask(processCtx, client, task)
+		processErr := a.processEmbeddingWork(processCtx, client, work)
 		processCancel()
 		if processErr == nil {
-			if err := a.store.CompleteTask(ctx, task.TaskID); err != nil {
-				runtime.LogWarningf(a.ctx, "Embedding task complete failed id=%d err=%v", task.TaskID, err)
+			if err := a.store.CompleteTask(ctx, work.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "Embedding task complete failed id=%d err=%v", work.TaskID, err)
 			}
 			continue
 		}
 
-		if task.Attempts >= embedTaskMaxAttempts {
-			if err := a.store.FailTask(ctx, task.TaskID); err != nil {
-				runtime.LogWarningf(a.ctx, "Embedding task fail mark failed id=%d err=%v", task.TaskID, err)
+		if work.Attempts >= embedTaskMaxAttempts {
+			if err := a.store.FailTask(ctx, work.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "Embedding task fail mark failed id=%d err=%v", work.TaskID, err)
 			}
 			continue
 		}
-		backoff := int64(task.Attempts * 45)
-		if err := a.store.RetryTask(ctx, task.TaskID, time.Now().Unix()+backoff); err != nil {
-			runtime.LogWarningf(a.ctx, "Embedding task retry failed id=%d err=%v", task.TaskID, err)
+		backoff := int64(work.Attempts * 45)
+		if err := a.store.RetryTask(ctx, work.TaskID, time.Now().Unix()+backoff); err != nil {
+			runtime.LogWarningf(a.ctx, "Embedding task retry failed id=%d err=%v", work.TaskID, err)
 		}
 	}
 }
@@ -2165,6 +2202,37 @@ func (a *App) enqueueEmbeddingCandidates(ctx context.Context) {
 		if err := a.store.EnqueueEmbeddingTask(ctx, item.ChunkID, 8); err != nil {
 			runtime.LogWarningf(a.ctx, "Embedding enqueue failed chunk=%d err=%v", item.ChunkID, err)
 		}
+	}
+}
+
+func (a *App) enqueueURLEmbeddingCandidates(ctx context.Context) {
+	candidates, err := a.store.ListURLEmbeddingCandidates(ctx, embedCandidateLimit)
+	if err != nil {
+		runtime.LogWarningf(a.ctx, "URL embedding candidate scan failed: %v", err)
+		return
+	}
+	for _, item := range candidates {
+		if strings.TrimSpace(item.Extracted) == "" {
+			continue
+		}
+		if err := a.store.EnqueueURLEmbeddingTask(ctx, item.URLID, 9); err != nil {
+			runtime.LogWarningf(a.ctx, "URL embedding enqueue failed url_id=%d err=%v", item.URLID, err)
+		}
+	}
+}
+
+func (a *App) processEmbeddingWork(ctx context.Context, client *embeddings.HTTPClient, work sqlite.EmbeddingWork) error {
+	switch strings.ToLower(strings.TrimSpace(work.Kind)) {
+	case "chunk":
+		return a.processEmbeddingTask(ctx, client, sqlite.EmbeddingTask{
+			TaskID:   work.TaskID,
+			ChunkID:  work.ChunkID,
+			Attempts: work.Attempts,
+		})
+	case "url":
+		return a.processURLEmbeddingTask(ctx, client, work.URLID)
+	default:
+		return nil
 	}
 }
 
@@ -2213,6 +2281,73 @@ func (a *App) processEmbeddingTask(ctx context.Context, client *embeddings.HTTPC
 		}
 	}
 	return nil
+}
+
+func (a *App) processURLEmbeddingTask(ctx context.Context, client *embeddings.HTTPClient, urlID int64) error {
+	if urlID == 0 {
+		return nil
+	}
+	doc, err := a.store.LoadURLDocForEmbedding(ctx, urlID)
+	if err != nil {
+		return nil
+	}
+
+	text := buildURLEmbeddingText(doc)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+
+	vectors, err := client.Embed(ctx, []string{text})
+	if err != nil {
+		return err
+	}
+	if len(vectors) == 0 || len(vectors[0]) == 0 {
+		return errors.New("empty embedding vector")
+	}
+	model, _ := a.store.GetSetting(ctx, "embeddings_model", "text-embedding-3-large")
+	if err := a.store.UpsertURLEmbedding(ctx, urlID, model, vectors[0], time.Now().Unix()); err != nil {
+		return err
+	}
+	if a.vectorIndex != nil {
+		nodeID := vectorNodeIDForURL(urlID)
+		if err := a.vectorIndex.Add(nodeID, vectors[0]); err != nil {
+			runtime.LogWarningf(a.ctx, "vector add failed url_id=%d err=%v", urlID, err)
+			return nil
+		}
+		if err := a.vectorIndex.Save(a.vectorGraphPath()); err != nil {
+			runtime.LogWarningf(a.ctx, "vector graph save failed: %v", err)
+		}
+	}
+	return nil
+}
+
+func vectorNodeIDForURL(urlID int64) int64 {
+	if urlID == 0 {
+		return 0
+	}
+	return -urlID
+}
+
+func buildURLEmbeddingText(doc sqlite.URLEmbeddingCandidate) string {
+	var b strings.Builder
+	title := strings.TrimSpace(doc.Title)
+	if title != "" {
+		b.WriteString(title)
+		b.WriteString("\n")
+	}
+	extracted := strings.TrimSpace(doc.Extracted)
+	if extracted == "" {
+		return strings.TrimSpace(b.String())
+	}
+
+	// Keep it bounded to avoid sending huge pages to the embeddings endpoint.
+	const maxRunes = 8000
+	runes := []rune(extracted)
+	if len(runes) > maxRunes {
+		extracted = string(runes[:maxRunes])
+	}
+	b.WriteString(extracted)
+	return strings.TrimSpace(b.String())
 }
 
 func isMostlyURLMessage(text string) bool {

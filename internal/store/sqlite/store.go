@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -162,6 +163,15 @@ CREATE TABLE IF NOT EXISTS url_docs (
 	extracted_text TEXT NOT NULL DEFAULT '',
 	hash TEXT NOT NULL DEFAULT '',
 	fetched_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS url_embeddings (
+	url_id INTEGER PRIMARY KEY,
+	model TEXT NOT NULL,
+	dims INTEGER NOT NULL,
+	vec BLOB NOT NULL,
+	created_at INTEGER NOT NULL,
+	FOREIGN KEY (url_id) REFERENCES url_docs(url_id) ON DELETE CASCADE
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_url_docs_unique ON url_docs(chat_id, msg_id, url);
@@ -772,7 +782,13 @@ func (s *Store) ResetEmbeddings(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, `DELETE FROM embeddings`); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM url_embeddings`); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE type = 'embed_chunk'`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM tasks WHERE type = 'embed_url'`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -800,6 +816,10 @@ WHERE enabled = 1
 
 type embeddingTaskPayload struct {
 	ChunkID int64 `json:"chunk_id"`
+}
+
+type urlEmbeddingTaskPayload struct {
+	URLID int64 `json:"url_id"`
 }
 
 func (s *Store) EnqueueEmbeddingTask(ctx context.Context, chunkID int64, priority int) error {
@@ -833,10 +853,49 @@ VALUES('embed_chunk', ?, 'pending', 0, ?, ?, ?)
 	return err
 }
 
-func (s *Store) ClaimEmbeddingTask(ctx context.Context, nowUnix int64) (EmbeddingTask, bool, error) {
+func (s *Store) EnqueueURLEmbeddingTask(ctx context.Context, urlID int64, priority int) error {
+	if urlID == 0 {
+		return errors.New("invalid url embedding task payload")
+	}
+	payload := urlEmbeddingTaskPayload{URLID: urlID}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM tasks
+WHERE type = 'embed_url'
+  AND payload = ?
+LIMIT 1
+`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	nowUnix := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
+VALUES('embed_url', ?, 'pending', 0, ?, ?, ?)
+`, string(encoded), nowUnix, priority, nowUnix)
+	return err
+}
+
+type EmbeddingWork struct {
+	TaskID   int64
+	Kind     string
+	ChunkID  int64
+	URLID    int64
+	Attempts int
+}
+
+func (s *Store) ClaimEmbeddingWork(ctx context.Context, nowUnix int64) (EmbeddingWork, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return EmbeddingTask{}, false, err
+		return EmbeddingWork{}, false, err
 	}
 	defer func() {
 		if err != nil {
@@ -846,24 +905,25 @@ func (s *Store) ClaimEmbeddingTask(ctx context.Context, nowUnix int64) (Embeddin
 
 	var (
 		taskID   int64
+		taskType string
 		payload  string
 		attempts int
 	)
 	err = tx.QueryRowContext(ctx, `
-SELECT task_id, payload, attempts
+SELECT task_id, type, payload, attempts
 FROM tasks
-WHERE type = 'embed_chunk'
+WHERE type IN ('embed_chunk','embed_url')
   AND state = 'pending'
   AND next_run_at <= ?
 ORDER BY priority ASC, created_at ASC
 LIMIT 1
-`, nowUnix).Scan(&taskID, &payload, &attempts)
+`, nowUnix).Scan(&taskID, &taskType, &payload, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = tx.Rollback()
-		return EmbeddingTask{}, false, nil
+		return EmbeddingWork{}, false, nil
 	}
 	if err != nil {
-		return EmbeddingTask{}, false, err
+		return EmbeddingWork{}, false, err
 	}
 
 	if _, err = tx.ExecContext(ctx, `
@@ -871,22 +931,35 @@ UPDATE tasks
 SET state = 'running', attempts = attempts + 1
 WHERE task_id = ?
 `, taskID); err != nil {
-		return EmbeddingTask{}, false, err
+		return EmbeddingWork{}, false, err
 	}
 
-	var decoded embeddingTaskPayload
-	if decodeErr := json.Unmarshal([]byte(payload), &decoded); decodeErr != nil {
-		return EmbeddingTask{}, false, decodeErr
+	work := EmbeddingWork{
+		TaskID:   taskID,
+		Attempts: attempts + 1,
+	}
+	switch taskType {
+	case "embed_chunk":
+		var decoded embeddingTaskPayload
+		if decodeErr := json.Unmarshal([]byte(payload), &decoded); decodeErr != nil {
+			return EmbeddingWork{}, false, decodeErr
+		}
+		work.Kind = "chunk"
+		work.ChunkID = decoded.ChunkID
+	case "embed_url":
+		var decoded urlEmbeddingTaskPayload
+		if decodeErr := json.Unmarshal([]byte(payload), &decoded); decodeErr != nil {
+			return EmbeddingWork{}, false, decodeErr
+		}
+		work.Kind = "url"
+		work.URLID = decoded.URLID
+	default:
+		return EmbeddingWork{}, false, fmt.Errorf("unknown embedding task type: %s", taskType)
 	}
 	if commitErr := tx.Commit(); commitErr != nil {
-		return EmbeddingTask{}, false, commitErr
+		return EmbeddingWork{}, false, commitErr
 	}
-
-	return EmbeddingTask{
-		TaskID:   taskID,
-		ChunkID:  decoded.ChunkID,
-		Attempts: attempts + 1,
-	}, true, nil
+	return work, true, nil
 }
 
 func (s *Store) ListEmbeddingCandidates(ctx context.Context, limit int) ([]EmbeddingCandidate, error) {
@@ -944,6 +1017,22 @@ WHERE ch.enabled = 1
 		return domain.EmbeddingsProgress{}, err
 	}
 
+	var totalURLEligible int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM url_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND ch.urls_mode IN ('lazy','full')
+  AND m.deleted = 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+  AND length(trim(d.extracted_text)) > 0
+`).Scan(&totalURLEligible); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
 	var embedded int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT COUNT(1)
@@ -962,6 +1051,23 @@ WHERE ch.enabled = 1
 		return domain.EmbeddingsProgress{}, err
 	}
 
+	var embeddedURLs int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM url_docs d
+JOIN url_embeddings e ON e.url_id = d.url_id
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND ch.urls_mode IN ('lazy','full')
+  AND m.deleted = 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+  AND length(trim(d.extracted_text)) > 0
+`).Scan(&embeddedURLs); err != nil {
+		return domain.EmbeddingsProgress{}, err
+	}
+
 	var pending, running, failed int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT
@@ -969,14 +1075,14 @@ SELECT
   SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END) AS running,
   SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed
 FROM tasks
-WHERE type = 'embed_chunk'
+WHERE type IN ('embed_chunk','embed_url')
 `).Scan(&pending, &running, &failed); err != nil {
 		return domain.EmbeddingsProgress{}, err
 	}
 
 	return domain.EmbeddingsProgress{
-		TotalEligible: totalEligible,
-		Embedded:      embedded,
+		TotalEligible: totalEligible + totalURLEligible,
+		Embedded:      embedded + embeddedURLs,
 		QueuePending:  pending,
 		QueueRunning:  running,
 		QueueFailed:   failed,
@@ -1093,6 +1199,240 @@ ORDER BY e.chunk_id ASC
 		})
 	}
 	return records, rows.Err()
+}
+
+type URLEmbeddingCandidate struct {
+	URLID        int64
+	ChatID       int64
+	MsgID        int64
+	URL          string
+	Title        string
+	Extracted    string
+	MessageTS    int64
+	EmbeddingsAt int64
+}
+
+func (s *Store) ListURLEmbeddingCandidates(ctx context.Context, limit int) ([]URLEmbeddingCandidate, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT d.url_id, d.chat_id, d.msg_id, d.url, d.title, d.extracted_text, m.ts
+FROM url_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+LEFT JOIN url_embeddings e ON e.url_id = d.url_id
+WHERE ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND ch.urls_mode IN ('lazy','full')
+  AND m.deleted = 0
+  AND e.url_id IS NULL
+  AND length(trim(d.extracted_text)) > 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+ORDER BY m.ts DESC
+LIMIT ?
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]URLEmbeddingCandidate, 0, limit)
+	for rows.Next() {
+		var item URLEmbeddingCandidate
+		if err := rows.Scan(&item.URLID, &item.ChatID, &item.MsgID, &item.URL, &item.Title, &item.Extracted, &item.MessageTS); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LoadURLDocForEmbedding(ctx context.Context, urlID int64) (URLEmbeddingCandidate, error) {
+	var item URLEmbeddingCandidate
+	err := s.db.QueryRowContext(ctx, `
+SELECT d.url_id, d.chat_id, d.msg_id, d.url, d.title, d.extracted_text, m.ts
+FROM url_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE d.url_id = ?
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND ch.urls_mode IN ('lazy','full')
+  AND m.deleted = 0
+  AND length(trim(d.extracted_text)) > 0
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+`, urlID).Scan(&item.URLID, &item.ChatID, &item.MsgID, &item.URL, &item.Title, &item.Extracted, &item.MessageTS)
+	if err != nil {
+		return URLEmbeddingCandidate{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) UpsertURLEmbedding(ctx context.Context, urlID int64, model string, vector []float32, createdAt int64) error {
+	if urlID == 0 {
+		return errors.New("url id is required")
+	}
+	if len(vector) == 0 {
+		return errors.New("embedding vector is empty")
+	}
+	blob := encodeFloat32Slice(vector)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO url_embeddings(url_id, model, dims, vec, created_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(url_id) DO UPDATE SET
+	model = excluded.model,
+	dims = excluded.dims,
+	vec = excluded.vec,
+	created_at = excluded.created_at
+`, urlID, strings.TrimSpace(model), len(vector), blob, createdAt)
+	return err
+}
+
+func (s *Store) ListURLEmbeddings(ctx context.Context, limit int) ([]EmbeddingRecord, error) {
+	query := `
+SELECT e.url_id, e.vec
+FROM url_embeddings e
+JOIN url_docs d ON d.url_id = e.url_id
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE m.deleted = 0
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+  AND ch.urls_mode IN ('lazy','full')
+  AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
+  AND length(trim(d.extracted_text)) > 0
+ORDER BY e.url_id ASC
+`
+	args := make([]any, 0, 1)
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]EmbeddingRecord, 0, 256)
+	for rows.Next() {
+		var (
+			id   int64
+			blob []byte
+		)
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, err
+		}
+		vector := decodeFloat32Slice(blob)
+		if len(vector) == 0 {
+			continue
+		}
+		records = append(records, EmbeddingRecord{
+			ChunkID: id,
+			Vector:  vector,
+		})
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) LookupURLDocResults(ctx context.Context, req domain.SearchRequest, urlIDs []int64) (map[int64]domain.SearchResult, error) {
+	if len(urlIDs) == 0 {
+		return map[int64]domain.SearchResult{}, nil
+	}
+
+	query := `
+SELECT
+	d.url_id,
+	d.chat_id,
+	d.msg_id,
+	m.ts,
+	ch.title,
+	m.sender_display,
+	m.text,
+	d.url,
+	d.final_url,
+	d.title
+FROM url_docs d
+JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
+JOIN chats ch ON ch.chat_id = d.chat_id
+WHERE d.url_id IN (
+`
+	args := make([]any, 0, len(urlIDs)+8)
+	for idx, id := range urlIDs {
+		if idx > 0 {
+			query += ","
+		}
+		query += "?"
+		args = append(args, id)
+	}
+	query += `
+)
+  AND m.deleted = 0
+  AND ch.enabled = 1
+  AND ch.allow_embeddings = 1
+`
+
+	if req.Filters.FromUnix > 0 {
+		query += " AND m.ts >= ?"
+		args = append(args, req.Filters.FromUnix)
+	}
+	if req.Filters.ToUnix > 0 {
+		query += " AND m.ts <= ?"
+		args = append(args, req.Filters.ToUnix)
+	}
+	if len(req.Filters.ChatIDs) > 0 {
+		query += " AND d.chat_id IN ("
+		for idx, id := range req.Filters.ChatIDs {
+			if idx > 0 {
+				query += ","
+			}
+			query += "?"
+			args = append(args, id)
+		}
+		query += ")"
+	}
+	if req.Filters.HasURL != nil && !*req.Filters.HasURL {
+		// URL docs are always URL-backed; respect HasURL=false filter by returning empty.
+		return map[int64]domain.SearchResult{}, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make(map[int64]domain.SearchResult, len(urlIDs))
+	for rows.Next() {
+		var (
+			urlID int64
+			item  domain.SearchResult
+		)
+		if err := rows.Scan(
+			&urlID,
+			&item.ChatID,
+			&item.MsgID,
+			&item.Timestamp,
+			&item.ChatTitle,
+			&item.Sender,
+			&item.MessageText,
+			&item.URL,
+			&item.URLFinal,
+			&item.URLTitle,
+		); err != nil {
+			return nil, err
+		}
+		item.SourceType = "url"
+		if strings.TrimSpace(item.URLTitle) != "" {
+			item.Snippet = item.URLTitle
+		} else {
+			item.Snippet = item.MessageText
+		}
+		results[urlID] = item
+	}
+	return results, rows.Err()
 }
 
 func (s *Store) LookupChunkResults(ctx context.Context, req domain.SearchRequest, chunkIDs []int64) (map[int64]domain.SearchResult, error) {

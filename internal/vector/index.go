@@ -94,8 +94,8 @@ func (h *HNSW) Add(chunkID int64, vector []float32) error {
 }
 
 func (h *HNSW) addLocked(chunkID int64, vector []float32) error {
-	if chunkID <= 0 {
-		return errors.New("chunk id must be positive")
+	if chunkID == 0 {
+		return errors.New("chunk id must be non-zero")
 	}
 	if len(vector) == 0 {
 		return errors.New("vector is required")
