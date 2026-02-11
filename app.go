@@ -978,13 +978,18 @@ func (a *App) TelegramChatFolders() ([]domain.ChatFolder, error) {
 		return nil, err
 	}
 	allIDs := make([]int64, 0, len(chats))
+	selectedIDs := make([]int64, 0, len(chats))
 	known := make(map[int64]struct{}, len(chats))
 	for _, chat := range chats {
 		allIDs = append(allIDs, chat.ChatID)
+		if chat.Enabled {
+			selectedIDs = append(selectedIDs, chat.ChatID)
+		}
 		known[chat.ChatID] = struct{}{}
 	}
 	folders := []domain.ChatFolder{
 		{ID: 0, Title: "All", ChatIDs: allIDs},
+		{ID: -1, Title: "Выбранные", Emoticon: "⭐", ChatIDs: selectedIDs},
 	}
 
 	if a.telegramSvc == nil {
@@ -1000,6 +1005,9 @@ func (a *App) TelegramChatFolders() ([]domain.ChatFolder, error) {
 
 	// Only return folders that reference discovered chats.
 	for _, f := range custom {
+		if strings.EqualFold(strings.TrimSpace(f.Title), "Новые") || strings.EqualFold(strings.TrimSpace(f.Title), "New") {
+			continue
+		}
 		filtered := make([]int64, 0, len(f.ChatIDs))
 		filteredPinned := make([]int64, 0, len(f.PinnedChatIDs))
 		for _, id := range f.PinnedChatIDs {
