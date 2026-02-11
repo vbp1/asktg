@@ -207,6 +207,43 @@
     document.documentElement.dataset.theme = theme;
   }
 
+  function escapeHtml(text) {
+    return String(text)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function snippetToHtml(snippet) {
+    const s = String(snippet ?? "");
+    if (!s) return "";
+
+    const open = "<mark>";
+    const close = "</mark>";
+
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      const j = s.indexOf(open, i);
+      if (j < 0) {
+        out += escapeHtml(s.slice(i));
+        break;
+      }
+      out += escapeHtml(s.slice(i, j));
+      const k = s.indexOf(close, j + open.length);
+      if (k < 0) {
+        // Treat unmatched <mark> as plain text.
+        out += escapeHtml(s.slice(j));
+        break;
+      }
+      out += "<mark>" + escapeHtml(s.slice(j + open.length, k)) + "</mark>";
+      i = k + close.length;
+    }
+    return out;
+  }
+
   function saveThemePreference(preference) {
     themePreference = preference;
     try {
@@ -827,7 +864,7 @@
             </div>
           {/if}
           <div class="sender">{result.sender}</div>
-          <div class="snippet">{result.snippet || result.message_text}</div>
+          <div class="snippet">{@html snippetToHtml(result.snippet || result.message_text)}</div>
           {#if result.source_type === "url"}
             <div class="sender">Source message: {result.message_text}</div>
           {/if}

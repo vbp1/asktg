@@ -7,6 +7,7 @@
   --border-muted: #eaeef2;
   --text: #0b0f14;
   --muted: #59636e;
+  --highlight-bg: #fff8c5;
   --accent: #0969da;
   --primary: #1f883d;
   --primary-hover: #1a7f37;
@@ -32,6 +33,7 @@
   --border-muted: #21262d;
   --text: #e6edf3;
   --muted: #7d8590;
+  --highlight-bg: rgba(187, 128, 9, 0.45);
   --accent: #2f81f7;
   --primary: #238636;
   --primary-hover: #2ea043;
@@ -524,6 +526,13 @@ button:disabled {
 
 .snippet {
   line-height: 1.45;
+}
+
+.snippet mark {
+  background: var(--highlight-bg);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
 }
 
 .empty {
