@@ -1547,6 +1547,11 @@ func BuildBestEffortDeepLink(chatID int64, msgID int64) string {
 	if chatID == 0 || msgID <= 0 {
 		return ""
 	}
+	// Prefer official message links for supergroups/channels where possible.
+	// Telegram chat IDs for those are typically -100<channel_id>.
+	if channelID, ok := toTmeChannelID(chatID); ok {
+		return fmt.Sprintf("https://t.me/c/%d/%d", channelID, msgID)
+	}
 	return fmt.Sprintf("tg://openmessage?chat_id=%d&message_id=%d", chatID, msgID)
 }
 
@@ -1555,6 +1560,19 @@ func BuildChatDeepLink(chatID int64) string {
 		return ""
 	}
 	return fmt.Sprintf("tg://openmessage?chat_id=%d", chatID)
+}
+
+func toTmeChannelID(chatID int64) (int64, bool) {
+	// See https://core.telegram.org/api/links#message-links (private links: t.me/c/<channel>/<id>)
+	// For channels/supergroups, chat IDs are commonly represented as -100<channel_id>.
+	if chatID > -1000000000000 {
+		return 0, false
+	}
+	channelID := (-chatID) - 1000000000000
+	if channelID <= 0 {
+		return 0, false
+	}
+	return channelID, true
 }
 
 func (a *App) ToggleMCP(enable bool) error {
