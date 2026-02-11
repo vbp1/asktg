@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"asktg/internal/domain"
+
 	tdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/query"
@@ -744,6 +746,24 @@ func peerToChatID(peer tg.PeerClass) (int64, bool) {
 	}
 }
 
+func inputPeerToChatID(peer tg.InputPeerClass, selfID int64) (int64, bool) {
+	switch p := peer.(type) {
+	case *tg.InputPeerSelf:
+		if selfID <= 0 {
+			return 0, false
+		}
+		return selfID, true
+	case *tg.InputPeerUser:
+		return p.UserID, true
+	case *tg.InputPeerChat:
+		return -p.ChatID, true
+	case *tg.InputPeerChannel:
+		return -(channelChatIDOffset + p.ChannelID), true
+	default:
+		return 0, false
+	}
+}
+
 func buildEntityLookupFromUpdate(entities tg.Entities) entityLookup {
 	lookup := entityLookup{
 		users:    make(map[int64]*tg.User, len(entities.Users)),
@@ -876,6 +896,179 @@ func (s *Service) setPending(phone, hash string) {
 	s.pendingPhone = phone
 	s.pendingHash = hash
 	s.mu.Unlock()
+}
+
+func (s *Service) ListChatFolders(ctx context.Context) ([]domain.ChatFolder, error) {
+	apiID, apiHash, err := s.credentials()
+	if err != nil {
+		return nil, err
+	}
+
+	var folders []domain.ChatFolder
+	err = s.withClient(ctx, apiID, apiHash, func(runCtx context.Context, client *tdtelegram.Client) error {
+		authStatus, statusErr := client.Auth().Status(runCtx)
+		if statusErr != nil {
+			return statusErr
+		}
+		if !authStatus.Authorized {
+			return ErrUnauthorized
+		}
+
+		self, selfErr := client.Self(runCtx)
+		if selfErr != nil {
+			return selfErr
+		}
+
+		chatIDsForFolder := func(folderID int) ([]int64, error) {
+			q := dialogs.QueryFunc(func(qCtx context.Context, req dialogs.Request) (tg.MessagesDialogsClass, error) {
+				r := &tg.MessagesGetDialogsRequest{
+					Limit:      req.Limit,
+					OffsetDate: req.OffsetDate,
+					OffsetID:   req.OffsetID,
+					OffsetPeer: req.OffsetPeer,
+				}
+				r.SetFolderID(folderID)
+				return client.API().MessagesGetDialogs(qCtx, r)
+			})
+
+			iter := dialogs.NewIterator(q, 100)
+			chatIDs := make([]int64, 0, 256)
+			chatIDSet := make(map[int64]struct{}, 256)
+			for iter.Next(runCtx) {
+				elem := iter.Value()
+				dialog, ok := elem.Dialog.(*tg.Dialog)
+				if !ok || dialog == nil {
+					continue
+				}
+				id, ok := peerToChatID(dialog.GetPeer())
+				if !ok {
+					continue
+				}
+				if _, seen := chatIDSet[id]; seen {
+					continue
+				}
+				chatIDSet[id] = struct{}{}
+				chatIDs = append(chatIDs, id)
+			}
+			if err := iter.Err(); err != nil {
+				return nil, err
+			}
+			return chatIDs, nil
+		}
+
+		df, dfErr := client.API().MessagesGetDialogFilters(runCtx)
+		if dfErr != nil {
+			return dfErr
+		}
+
+		for _, raw := range df.Filters {
+			var (
+				id       int
+				title    string
+				emoticon string
+				colorID  int
+				pinnedIP []tg.InputPeerClass
+				include  []tg.InputPeerClass
+			)
+
+			switch filter := raw.(type) {
+			case *tg.DialogFilter:
+				if filter == nil {
+					continue
+				}
+				id = filter.ID
+				title = strings.TrimSpace(filter.Title.Text)
+				emoticon = strings.TrimSpace(filter.Emoticon)
+				colorID = filter.Color
+				pinnedIP = filter.PinnedPeers
+				include = filter.IncludePeers
+			case *tg.DialogFilterChatlist:
+				if filter == nil {
+					continue
+				}
+				id = filter.ID
+				title = strings.TrimSpace(filter.Title.Text)
+				emoticon = strings.TrimSpace(filter.Emoticon)
+				colorID = filter.Color
+				pinnedIP = filter.PinnedPeers
+				include = filter.IncludePeers
+			default:
+				continue
+			}
+
+			if title == "" {
+				title = fmt.Sprintf("Folder %d", id)
+			}
+
+			pinned := make([]int64, 0, len(pinnedIP))
+			pinnedSet := make(map[int64]struct{}, len(pinnedIP))
+			for _, peer := range pinnedIP {
+				pid, ok := inputPeerToChatID(peer, self.ID)
+				if !ok {
+					continue
+				}
+				if _, seen := pinnedSet[pid]; seen {
+					continue
+				}
+				pinnedSet[pid] = struct{}{}
+				pinned = append(pinned, pid)
+			}
+
+			chatIDs, listErr := chatIDsForFolder(id)
+			if listErr != nil {
+				// Best-effort fallback: use pinned+included peers if server-side listing fails.
+				seen := make(map[int64]struct{}, len(pinnedIP)+len(include))
+				chatIDs = make([]int64, 0, len(pinnedIP)+len(include))
+				for _, pid := range pinned {
+					seen[pid] = struct{}{}
+					chatIDs = append(chatIDs, pid)
+				}
+				for _, peer := range include {
+					cid, ok := inputPeerToChatID(peer, self.ID)
+					if !ok {
+						continue
+					}
+					if _, ok := seen[cid]; ok {
+						continue
+					}
+					seen[cid] = struct{}{}
+					chatIDs = append(chatIDs, cid)
+				}
+			}
+
+			// Put pinned chats at the front (preserve dialog order for the rest).
+			if len(pinned) > 0 && len(chatIDs) > 0 {
+				inPinned := make(map[int64]struct{}, len(pinned))
+				for _, pid := range pinned {
+					inPinned[pid] = struct{}{}
+				}
+				rest := make([]int64, 0, len(chatIDs))
+				for _, cid := range chatIDs {
+					if _, ok := inPinned[cid]; ok {
+						continue
+					}
+					rest = append(rest, cid)
+				}
+				chatIDs = append(append([]int64{}, pinned...), rest...)
+			}
+
+			folders = append(folders, domain.ChatFolder{
+				ID:            id,
+				Title:         title,
+				Emoticon:      emoticon,
+				Color:         colorID,
+				ChatIDs:       chatIDs,
+				PinnedChatIDs: pinned,
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return folders, nil
 }
 
 func (s *Service) clearPending() {

@@ -1,4 +1,6 @@
 <script>
+  import { onMount } from "svelte";
+
   const backend = () => window?.go?.main?.App;
 
   let status = null;
@@ -17,8 +19,6 @@
   let onboardingBusy = false;
   let errorText = "";
   let infoText = "";
-  let tgApiID = "";
-  let tgAPIHash = "";
   let tgPhone = "";
   let tgCode = "";
   let tgPassword = "";
@@ -36,7 +36,183 @@
   let dataDirPath = "";
   let dataDirBusy = false;
   let currentPage = "search";
+
+  const THEME_STORAGE_KEY = "asktg.theme";
+  let themePreference = "system"; // "system" | "light" | "dark"
+  let themeMediaQuery = null;
+
+  let chatFolders = [];
+  let activeChatFolderId = 0;
+  let chatsById = {};
+  let chatEdits = {};
+  let applyAllBusy = false;
+  let applyAllDone = 0;
+  let applyAllTotal = 0;
+
   $: onboardingIncomplete = Boolean(onboarding && !onboarding.completed);
+  $: activeChatFolder = chatFolders.find((f) => f.id === activeChatFolderId) || chatFolders[0] || null;
+  $: visibleChats = chatsForFolder(chats, activeChatFolder);
+  $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
+  $: dirtyCount = dirtyChatIds.length;
+
+  function syncChatEditsFromChats(items) {
+    const nextChatsById = {};
+    const nextEdits = { ...chatEdits };
+
+    for (const chat of items || []) {
+      nextChatsById[chat.chat_id] = chat;
+
+      const prev = nextEdits[chat.chat_id];
+      const base = chat;
+      if (!prev) {
+        nextEdits[chat.chat_id] = {
+          enabled: base.enabled,
+          allow_embeddings: base.allow_embeddings,
+          history_mode: base.history_mode,
+          urls_mode: base.urls_mode,
+          dirty: false,
+          saving: false,
+        };
+        continue;
+      }
+
+      // If the row isn't being edited, keep it in sync with backend.
+      if (!prev.dirty && !prev.saving) {
+        nextEdits[chat.chat_id] = {
+          enabled: base.enabled,
+          allow_embeddings: base.allow_embeddings,
+          history_mode: base.history_mode,
+          urls_mode: base.urls_mode,
+          dirty: false,
+          saving: false,
+        };
+        continue;
+      }
+
+      const dirty =
+        prev.enabled !== base.enabled ||
+        prev.allow_embeddings !== base.allow_embeddings ||
+        prev.history_mode !== base.history_mode ||
+        prev.urls_mode !== base.urls_mode;
+      nextEdits[chat.chat_id] = { ...prev, dirty };
+    }
+
+    for (const key of Object.keys(nextEdits)) {
+      if (!nextChatsById[key]) {
+        delete nextEdits[key];
+      }
+    }
+
+    chatsById = nextChatsById;
+    chatEdits = nextEdits;
+  }
+
+  function setChatEdit(chatId, patch) {
+    const prev = chatEdits[chatId];
+    const base = chatsById[chatId];
+    if (!prev || !base) return;
+
+    const next = { ...prev, ...patch };
+    next.dirty =
+      next.enabled !== base.enabled ||
+      next.allow_embeddings !== base.allow_embeddings ||
+      next.history_mode !== base.history_mode ||
+      next.urls_mode !== base.urls_mode;
+    chatEdits = { ...chatEdits, [chatId]: next };
+  }
+
+  function discardAllChatEdits() {
+    const next = { ...chatEdits };
+    for (const [chatId, edit] of Object.entries(next)) {
+      const base = chatsById[chatId];
+      if (!base) continue;
+      next[chatId] = {
+        enabled: base.enabled,
+        allow_embeddings: base.allow_embeddings,
+        history_mode: base.history_mode,
+        urls_mode: base.urls_mode,
+        dirty: false,
+        saving: false,
+      };
+    }
+    chatEdits = next;
+  }
+
+  async function applyAllChatPolicies() {
+    const ids = dirtyChatIds.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    if (ids.length === 0) return;
+
+    applyAllBusy = true;
+    applyAllDone = 0;
+    applyAllTotal = ids.length;
+    errorText = "";
+    infoText = "";
+
+    try {
+      for (const chatId of ids) {
+        const key = String(chatId);
+        const edit = chatEdits[key];
+        if (!edit || !edit.dirty) {
+          applyAllDone++;
+          continue;
+        }
+        chatEdits = { ...chatEdits, [key]: { ...edit, saving: true } };
+
+        await backend().SetChatPolicy(chatId, edit.enabled, edit.history_mode, edit.allow_embeddings, edit.urls_mode);
+
+        const after = chatEdits[key];
+        if (after) {
+          chatEdits = { ...chatEdits, [key]: { ...after, saving: false, dirty: false } };
+        }
+        applyAllDone++;
+      }
+
+      await refreshStatus();
+      await refreshOnboardingStatus();
+      await refreshChats();
+      infoText = `Saved ${applyAllTotal} chat${applyAllTotal === 1 ? "" : "s"}`;
+    } catch (error) {
+      errorText = String(error);
+      await refreshChats();
+    } finally {
+      applyAllBusy = false;
+    }
+  }
+
+  function chatsForFolder(items, folder) {
+    if (!folder) {
+      return items || [];
+    }
+    if (folder.id === 0) {
+      return items || [];
+    }
+    if (!Array.isArray(folder.chat_ids) || folder.chat_ids.length === 0) {
+      return [];
+    }
+    const byId = new Map((items || []).map((c) => [c.chat_id, c]));
+    return folder.chat_ids.map((id) => byId.get(id)).filter(Boolean);
+  }
+
+  function resolveTheme(preference) {
+    if (preference === "light" || preference === "dark") return preference;
+    if (typeof window === "undefined") return "light";
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function applyTheme(preference) {
+    const theme = resolveTheme(preference);
+    document.documentElement.dataset.theme = theme;
+  }
+
+  function saveThemePreference(preference) {
+    themePreference = preference;
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, preference);
+    } catch {
+      // ignore
+    }
+    applyTheme(preference);
+  }
 
   async function refreshStatus() {
     try {
@@ -51,8 +227,26 @@
   async function refreshChats() {
     try {
       chats = await backend().ListChats();
+      syncChatEditsFromChats(chats);
+      await refreshChatFolders();
     } catch (error) {
       errorText = String(error);
+    }
+  }
+
+  async function refreshChatFolders() {
+    try {
+      chatFolders = await backend().TelegramChatFolders();
+      if (!Array.isArray(chatFolders) || chatFolders.length === 0) {
+        chatFolders = [];
+        activeChatFolderId = 0;
+        return;
+      }
+      if (!chatFolders.some((f) => f.id === activeChatFolderId)) {
+        activeChatFolderId = chatFolders[0].id;
+      }
+    } catch {
+      // Best-effort; "All" view still works.
     }
   }
 
@@ -124,27 +318,10 @@
     }
   }
 
-  async function ensureTelegramCredentials() {
-    const id = tgApiID.trim();
-    const hash = tgAPIHash.trim();
-    if (!id && !hash) {
-      return;
-    }
-    if (!id || !hash) {
-      throw new Error("Set both Telegram API ID and API Hash");
-    }
-    const parsedID = Number(id);
-    if (!Number.isInteger(parsedID) || parsedID <= 0) {
-      throw new Error("Telegram API ID must be a positive integer");
-    }
-    await backend().TelegramSetCredentials(parsedID, hash);
-  }
-
   async function requestTelegramCode() {
     telegramBusy = true;
     errorText = "";
     try {
-      await ensureTelegramCredentials();
       telegramStatus = await backend().TelegramRequestCode(tgPhone);
     } catch (error) {
       errorText = String(error);
@@ -336,22 +513,6 @@
     return chats.filter((chat) => chat.enabled).map((chat) => chat.chat_id);
   }
 
-  async function updatePolicy(chat) {
-    try {
-      await backend().SetChatPolicy(
-        chat.chat_id,
-        chat.enabled,
-        chat.history_mode,
-        chat.allow_embeddings,
-        chat.urls_mode
-      );
-      await refreshStatus();
-      await refreshOnboardingStatus();
-    } catch (error) {
-      errorText = String(error);
-    }
-  }
-
   async function completeOnboarding() {
     onboardingBusy = true;
     errorText = "";
@@ -526,12 +687,53 @@
   refreshTrayStatus();
   refreshDataDir();
   refreshChats();
+  refreshChatFolders();
+
+  onMount(() => {
+    try {
+      const stored = localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "light" || stored === "dark" || stored === "system") {
+        themePreference = stored;
+      }
+    } catch {
+      // ignore
+    }
+
+    applyTheme(themePreference);
+
+    if (window.matchMedia) {
+      themeMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const handler = () => themePreference === "system" && applyTheme("system");
+      if (themeMediaQuery.addEventListener) themeMediaQuery.addEventListener("change", handler);
+      else themeMediaQuery.addListener(handler);
+
+      return () => {
+        if (!themeMediaQuery) return;
+        if (themeMediaQuery.removeEventListener) themeMediaQuery.removeEventListener("change", handler);
+        else themeMediaQuery.removeListener(handler);
+      };
+    }
+  });
 </script>
 
 <main class="layout">
   <section class="hero">
-    <h1>Telegram Sidecar Search</h1>
-    <p>Local-first FTS + Hybrid search with read-only MCP endpoint.</p>
+    <div class="heroHeader">
+      <div>
+        <h1>Telegram Sidecar Search</h1>
+        <p>Local-first FTS + Hybrid search with read-only MCP endpoint.</p>
+      </div>
+      <div class="heroControls">
+        <label>
+          Theme
+          <select bind:value={themePreference} on:change={(e) => saveThemePreference(e.currentTarget.value)}>
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+      </div>
+    </div>
     <div class="row wrap navRow">
       <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
       <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
@@ -740,8 +942,6 @@
     <section class="panel">
       <h2>Telegram Setup</h2>
       <div class="tgGrid">
-        <input bind:value={tgApiID} placeholder="API ID" />
-        <input bind:value={tgAPIHash} placeholder="API Hash" />
         <input bind:value={tgPhone} placeholder="Phone (+123...)" />
         <input bind:value={tgCode} placeholder="Login code" />
         <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" />
@@ -764,28 +964,160 @@
 
     <section class="panel">
       <h2>Chats & Policies</h2>
-      {#each chats as chat}
-        <div class="chatRow">
-          <div class="chatMeta">
-            <strong>{chat.title}</strong>
-            <small>{chat.type}</small>
-          </div>
-          <label><input bind:checked={chat.enabled} on:change={() => updatePolicy(chat)} type="checkbox" /> enabled</label>
-          <label><input bind:checked={chat.allow_embeddings} on:change={() => updatePolicy(chat)} type="checkbox" /> embeddings</label>
-          <select bind:value={chat.history_mode} on:change={() => updatePolicy(chat)}>
-            <option value="full">full</option>
-            <option value="lazy">lazy</option>
-          </select>
-          <select bind:value={chat.urls_mode} on:change={() => updatePolicy(chat)}>
-            <option value="off">off</option>
-            <option value="lazy">lazy</option>
-            <option value="full">full</option>
-          </select>
-          <button class="danger small" on:click={() => purgeChatData(chat)} disabled={maintenanceBusy || telegramBusy || syncBusy}>
-            purge
+      {#if chatFolders.length > 0}
+        <div class="folderTabs">
+          {#each chatFolders as folder (folder.id)}
+            <button class:active={activeChatFolderId === folder.id} on:click={() => (activeChatFolderId = folder.id)}>
+              {(folder.emoticon ? folder.emoticon + " " : "") + folder.title}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      <div class="chatToolbar">
+        <div class="mutedLine">Unsaved changes: {dirtyCount}</div>
+        <div class="row wrap">
+          <button class="small" on:click={discardAllChatEdits} disabled={dirtyCount === 0 || applyAllBusy}>
+            Discard
+          </button>
+          <button class="small primary" on:click={applyAllChatPolicies} disabled={dirtyCount === 0 || applyAllBusy}>
+            {applyAllBusy ? `Applying ${applyAllDone}/${applyAllTotal}...` : "Apply changes"}
           </button>
         </div>
-      {/each}
+      </div>
+      <p class="mutedLine">
+        Changes are staged and applied only after clicking <strong>Apply changes</strong>. Hover controls for details.
+      </p>
+
+      {#if visibleChats.length === 0}
+        <div class="empty">No chats in this folder.</div>
+      {/if}
+
+      <div class="chatList">
+        {#each visibleChats as chat (chat.chat_id)}
+          <div class="chatRow" class:dirtyRow={chatEdits[chat.chat_id]?.dirty}>
+            <div class="chatMeta">
+              <strong>{chat.title}{chatEdits[chat.chat_id]?.dirty ? " *" : ""}</strong>
+              <small>{chat.type}</small>
+            </div>
+
+            <label class="switchWrap" title="Include this chat in syncing and search indexing.">
+              <span class="fieldLabel">Enabled</span>
+              <span class="switch">
+                <input
+                  type="checkbox"
+                  checked={Boolean(chatEdits[chat.chat_id]?.enabled ?? chat.enabled)}
+                  disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                  on:change={(e) => setChatEdit(chat.chat_id, { enabled: e.currentTarget.checked })}
+                />
+                <span class="slider"></span>
+              </span>
+            </label>
+
+            <label class="switchWrap" title="Allow semantic embeddings for this chat (only used if embeddings are configured).">
+              <span class="fieldLabel">Embeddings</span>
+              <span class="switch">
+                <input
+                  type="checkbox"
+                  checked={Boolean(chatEdits[chat.chat_id]?.allow_embeddings ?? chat.allow_embeddings)}
+                  disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                  on:change={(e) => setChatEdit(chat.chat_id, { allow_embeddings: e.currentTarget.checked })}
+                />
+                <span class="slider"></span>
+              </span>
+            </label>
+
+            <div class="enumField">
+              <div class="enumMeta">
+                <span class="fieldLabel">History</span>
+                <span class="caption">Backfill indexes older messages. New only indexes just new messages.</span>
+              </div>
+              <div class="pills">
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "full"}
+                  title="Backfill: index older messages (more complete, may take longer)."
+                >
+                  <input
+                    type="radio"
+                    name={`hist-${chat.chat_id}`}
+                    value="full"
+                    checked={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "full"}
+                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { history_mode: "full" })}
+                  />
+                  Backfill
+                </label>
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "lazy"}
+                  title="New only: index only new incoming messages."
+                >
+                  <input
+                    type="radio"
+                    name={`hist-${chat.chat_id}`}
+                    value="lazy"
+                    checked={(chatEdits[chat.chat_id]?.history_mode ?? chat.history_mode) === "lazy"}
+                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { history_mode: "lazy" })}
+                  />
+                  New only
+                </label>
+              </div>
+            </div>
+
+            <div class="enumField">
+              <div class="enumMeta">
+                <span class="fieldLabel">URLs</span>
+                <span class="caption">Low indexes URLs with lower priority. High indexes more aggressively. Off disables URL indexing.</span>
+              </div>
+              <div class="pills">
+                <label class:active={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "off"} title="Off: do not index URLs.">
+                  <input
+                    type="radio"
+                    name={`urls-${chat.chat_id}`}
+                    value="off"
+                    checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "off"}
+                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { urls_mode: "off" })}
+                  />
+                  Off
+                </label>
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "lazy"}
+                  title="Low: index URLs with lower priority."
+                >
+                  <input
+                    type="radio"
+                    name={`urls-${chat.chat_id}`}
+                    value="lazy"
+                    checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "lazy"}
+                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { urls_mode: "lazy" })}
+                  />
+                  Low
+                </label>
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "full"}
+                  title="High: index URLs more aggressively."
+                >
+                  <input
+                    type="radio"
+                    name={`urls-${chat.chat_id}`}
+                    value="full"
+                    checked={(chatEdits[chat.chat_id]?.urls_mode ?? chat.urls_mode) === "full"}
+                    disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { urls_mode: "full" })}
+                  />
+                  High
+                </label>
+              </div>
+            </div>
+
+            <button class="danger small" on:click={() => purgeChatData(chat)} disabled={applyAllBusy || maintenanceBusy || telegramBusy || syncBusy}>
+              purge
+            </button>
+          </div>
+        {/each}
+      </div>
     </section>
   {/if}
 </main>

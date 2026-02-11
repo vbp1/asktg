@@ -118,6 +118,10 @@ export function TelegramAuthStatus() {
   return window['go']['main']['App']['TelegramAuthStatus']();
 }
 
+export function TelegramChatFolders() {
+  return window['go']['main']['App']['TelegramChatFolders']();
+}
+
 export function TelegramLoadChats() {
   return window['go']['main']['App']['TelegramLoadChats']();
 }

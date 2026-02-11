@@ -102,6 +102,15 @@ type OnboardingStatus struct {
 	EnabledChats       int  `json:"enabled_chats"`
 }
 
+type ChatFolder struct {
+	ID            int     `json:"id"`
+	Title         string  `json:"title"`
+	Emoticon      string  `json:"emoticon,omitempty"`
+	Color         int     `json:"color,omitempty"`
+	ChatIDs       []int64 `json:"chat_ids"`
+	PinnedChatIDs []int64 `json:"pinned_chat_ids,omitempty"`
+}
+
 func (s *IndexStatus) Touch() {
 	s.UpdatedAtUnix = time.Now().Unix()
 }

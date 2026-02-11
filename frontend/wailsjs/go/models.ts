@@ -1,5 +1,27 @@
 export namespace domain {
 	
+	export class ChatFolder {
+	    id: number;
+	    title: string;
+	    emoticon?: string;
+	    color?: number;
+	    chat_ids: number[];
+	    pinned_chat_ids?: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatFolder(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.emoticon = source["emoticon"];
+	        this.color = source["color"];
+	        this.chat_ids = source["chat_ids"];
+	        this.pinned_chat_ids = source["pinned_chat_ids"];
+	    }
+	}
 	export class ChatPolicy {
 	    chat_id: number;
 	    title: string;

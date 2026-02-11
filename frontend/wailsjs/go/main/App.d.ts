@@ -60,6 +60,8 @@ export function SyncNow():Promise<domain.IndexStatus>;
 
 export function TelegramAuthStatus():Promise<domain.TelegramAuthStatus>;
 
+export function TelegramChatFolders():Promise<Array<domain.ChatFolder>>;
+
 export function TelegramLoadChats():Promise<Array<domain.ChatPolicy>>;
 
 export function TelegramRequestCode(arg1:string):Promise<domain.TelegramAuthStatus>;

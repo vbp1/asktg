@@ -106,6 +106,7 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 	a.telegramSvc = telegram.NewService(filepath.Join(a.cfg.DataDir, "telegram", "session.json"))
+	a.seedTelegramCredentials(ctx)
 	a.configureTelegramFromStore(ctx)
 	a.configureEmbeddingsFromStore(ctx)
 	a.bootstrapVectorIndex(ctx)
@@ -124,6 +125,48 @@ func (a *App) startup(ctx context.Context) {
 	if !a.paused {
 		a.startWorkers()
 	}
+}
+
+func (a *App) seedTelegramCredentials(ctx context.Context) {
+	if a.store == nil || a.telegramSvc == nil {
+		return
+	}
+
+	existingID, _ := a.store.GetSettingInt(ctx, "telegram_api_id", 0)
+	existingHash, _ := a.readSecretSetting(ctx, "telegram_api_hash")
+	if existingID > 0 && strings.TrimSpace(existingHash) != "" {
+		return
+	}
+
+	apiID, apiHash, ok := telegramSeedCredentials()
+	if !ok {
+		return
+	}
+
+	if err := a.TelegramSetCredentials(apiID, apiHash); err != nil {
+		runtime.LogWarningf(ctx, "Telegram credential seed failed: %v", err)
+		return
+	}
+	runtime.LogInfo(ctx, "Telegram credentials loaded from local environment/build defaults.")
+}
+
+func telegramSeedCredentials() (int, string, bool) {
+	// Prefer runtime env vars so users can set secrets without baking them into source control.
+	idRaw := strings.TrimSpace(os.Getenv("ASKTG_TG_API_ID"))
+	hashRaw := strings.TrimSpace(os.Getenv("ASKTG_TG_API_HASH"))
+
+	if idRaw != "" || hashRaw != "" {
+		if idRaw == "" || hashRaw == "" {
+			return 0, "", false
+		}
+		apiID, err := strconv.Atoi(idRaw)
+		if err != nil || apiID <= 0 {
+			return 0, "", false
+		}
+		return apiID, hashRaw, true
+	}
+
+	return embeddedTelegramCredentials()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -873,6 +916,57 @@ func (a *App) TelegramLoadChats() ([]domain.ChatPolicy, error) {
 		}
 	}
 	return a.store.ListChats(a.ctx)
+}
+
+func (a *App) TelegramChatFolders() ([]domain.ChatFolder, error) {
+	if a.store == nil {
+		return nil, errors.New("store is not initialized")
+	}
+	chats, err := a.store.ListChats(a.ctx)
+	if err != nil {
+		return nil, err
+	}
+	allIDs := make([]int64, 0, len(chats))
+	known := make(map[int64]struct{}, len(chats))
+	for _, chat := range chats {
+		allIDs = append(allIDs, chat.ChatID)
+		known[chat.ChatID] = struct{}{}
+	}
+	folders := []domain.ChatFolder{
+		{ID: 0, Title: "All", ChatIDs: allIDs},
+	}
+
+	if a.telegramSvc == nil {
+		return folders, nil
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	custom, err := a.telegramSvc.ListChatFolders(ctx)
+	if err != nil {
+		// Folders are nice-to-have; return "All" if Telegram isn't ready.
+		return folders, nil
+	}
+
+	// Only return folders that reference discovered chats.
+	for _, f := range custom {
+		filtered := make([]int64, 0, len(f.ChatIDs))
+		filteredPinned := make([]int64, 0, len(f.PinnedChatIDs))
+		for _, id := range f.PinnedChatIDs {
+			if _, ok := known[id]; ok {
+				filteredPinned = append(filteredPinned, id)
+			}
+		}
+		for _, id := range f.ChatIDs {
+			if _, ok := known[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		f.ChatIDs = filtered
+		f.PinnedChatIDs = filteredPinned
+		folders = append(folders, f)
+	}
+
+	return folders, nil
 }
 
 func (a *App) Search(query string, mode string, advanced bool, chatIDs []int64, fromUnix int64, toUnix int64, limit int) ([]domain.SearchResult, error) {
