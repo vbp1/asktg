@@ -61,6 +61,7 @@
   $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
   $: dirtyCount = dirtyChatIds.length;
   $: semanticResultCount = (results || []).filter((r) => r && r.match_semantic).length;
+  $: ftsResultCount = (results || []).filter((r) => r && r.match_fts).length;
   $: embProgressPercent =
     embProgress && embProgress.total_eligible > 0
       ? Math.max(0, Math.min(100, Math.floor((embProgress.embedded / embProgress.total_eligible) * 100)))
@@ -910,7 +911,12 @@
     <section class="panel">
       <h2>Results</h2>
       {#if mode === "hybrid"}
-        <p class="mutedLine">Semantic matches: {semanticResultCount}{!embConfigured ? " (embeddings not configured)" : ""}</p>
+        <p class="mutedLine">
+          FTS matches: {ftsResultCount} · Semantic matches: {semanticResultCount}
+          {!embConfigured ? " (embeddings not configured)" : ""}
+        </p>
+      {:else if mode === "fts"}
+        <p class="mutedLine">FTS matches: {results.length}</p>
       {/if}
       {#if results.length === 0}
         <div class="empty">No results yet. Run a search.</div>
