@@ -851,7 +851,12 @@
       {#each results as result}
         <div class="resultCard">
           <div class="resultHead">
-            <strong>{result.chat_title}</strong>
+            <div class="resultTitle">
+              <strong>{result.chat_title}</strong>
+              {#if result.match_semantic}
+                <span class="badge semantic">Semantic</span>
+              {/if}
+            </div>
             <small>{new Date(result.timestamp * 1000).toLocaleString()}</small>
           </div>
           {#if result.source_type === "url"}

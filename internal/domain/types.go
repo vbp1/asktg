@@ -38,19 +38,21 @@ type SearchRequest struct {
 }
 
 type SearchResult struct {
-	ChatID      int64   `json:"chat_id"`
-	MsgID       int64   `json:"msg_id"`
-	Timestamp   int64   `json:"timestamp"`
-	ChatTitle   string  `json:"chat_title"`
-	Sender      string  `json:"sender"`
-	Snippet     string  `json:"snippet"`
-	MessageText string  `json:"message_text"`
-	SourceType  string  `json:"source_type,omitempty"`
-	URL         string  `json:"url,omitempty"`
-	URLFinal    string  `json:"url_final,omitempty"`
-	URLTitle    string  `json:"url_title,omitempty"`
-	Score       float64 `json:"score"`
-	DeepLink    string  `json:"deep_link,omitempty"`
+	ChatID        int64   `json:"chat_id"`
+	MsgID         int64   `json:"msg_id"`
+	Timestamp     int64   `json:"timestamp"`
+	ChatTitle     string  `json:"chat_title"`
+	Sender        string  `json:"sender"`
+	Snippet       string  `json:"snippet"`
+	MessageText   string  `json:"message_text"`
+	SourceType    string  `json:"source_type,omitempty"`
+	URL           string  `json:"url,omitempty"`
+	URLFinal      string  `json:"url_final,omitempty"`
+	URLTitle      string  `json:"url_title,omitempty"`
+	Score         float64 `json:"score"`
+	DeepLink      string  `json:"deep_link,omitempty"`
+	MatchFTS      bool    `json:"match_fts,omitempty"`
+	MatchSemantic bool    `json:"match_semantic,omitempty"`
 }
 
 type Message struct {

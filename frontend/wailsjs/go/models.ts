@@ -188,6 +188,8 @@ export namespace domain {
 	    url_title?: string;
 	    score: number;
 	    deep_link?: string;
+	    match_fts?: boolean;
+	    match_semantic?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new SearchResult(source);
@@ -208,6 +210,8 @@ export namespace domain {
 	        this.url_title = source["url_title"];
 	        this.score = source["score"];
 	        this.deep_link = source["deep_link"];
+	        this.match_fts = source["match_fts"];
+	        this.match_semantic = source["match_semantic"];
 	    }
 	}
 	export class TelegramAuthStatus {

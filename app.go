@@ -1062,6 +1062,9 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	if err != nil {
 		return nil, err
 	}
+	for idx := range ftsResults {
+		ftsResults[idx].MatchFTS = true
+	}
 	if req.Mode != domain.SearchModeHybrid {
 		return ftsResults, nil
 	}
@@ -1128,6 +1131,7 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 			continue
 		}
 		item.Score = distance[candidate.ChunkID]
+		item.MatchSemantic = true
 		results = append(results, item)
 		if len(results) >= limit {
 			break
@@ -2221,6 +2225,8 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 			if current.item.Snippet == "" {
 				current.item.Snippet = item.Snippet
 			}
+			current.item.MatchFTS = current.item.MatchFTS || item.MatchFTS
+			current.item.MatchSemantic = current.item.MatchSemantic || item.MatchSemantic
 			merged[key] = current
 		}
 	}
