@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS embeddings (
 	created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS embedding_skips (
+	chunk_id INTEGER PRIMARY KEY,
+	reason TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL DEFAULT 0,
+	FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS url_docs (
 	url_id INTEGER PRIMARY KEY AUTOINCREMENT,
 	chat_id INTEGER NOT NULL,
@@ -892,11 +899,13 @@ FROM chunks c
 JOIN chats ch ON ch.chat_id = c.chat_id
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
 LEFT JOIN embeddings e ON e.chunk_id = c.chunk_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = c.chunk_id
 WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
   AND e.chunk_id IS NULL
+  AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 ORDER BY m.ts DESC
 LIMIT ?
@@ -924,10 +933,12 @@ SELECT COUNT(1)
 FROM chunks c
 JOIN chats ch ON ch.chat_id = c.chat_id
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = c.chunk_id
 WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `).Scan(&totalEligible); err != nil {
 		return domain.EmbeddingsProgress{}, err
@@ -940,10 +951,12 @@ FROM chunks c
 JOIN chats ch ON ch.chat_id = c.chat_id
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
 JOIN embeddings e ON e.chunk_id = c.chunk_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = c.chunk_id
 WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `).Scan(&embedded); err != nil {
 		return domain.EmbeddingsProgress{}, err
@@ -977,11 +990,13 @@ SELECT c.chunk_id, c.chat_id, c.msg_id, c.text
 FROM chunks c
 JOIN chats ch ON ch.chat_id = c.chat_id
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = c.chunk_id
 WHERE c.chunk_id = ?
   AND ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `, chunkID).Scan(&item.ChunkID, &item.ChatID, &item.MsgID, &item.Text)
 	if err != nil {
@@ -1010,6 +1025,28 @@ ON CONFLICT(chunk_id) DO UPDATE SET
 	return err
 }
 
+func (s *Store) DeleteEmbedding(ctx context.Context, chunkID int64) error {
+	if chunkID == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM embeddings WHERE chunk_id = ?`, chunkID)
+	return err
+}
+
+func (s *Store) MarkEmbeddingSkipped(ctx context.Context, chunkID int64, reason string, createdAt int64) error {
+	if chunkID == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO embedding_skips(chunk_id, reason, created_at)
+VALUES(?, ?, ?)
+ON CONFLICT(chunk_id) DO UPDATE SET
+	reason = excluded.reason,
+	created_at = excluded.created_at
+`, chunkID, strings.TrimSpace(reason), createdAt)
+	return err
+}
+
 func (s *Store) ListEmbeddings(ctx context.Context, limit int) ([]EmbeddingRecord, error) {
 	query := `
 SELECT e.chunk_id, e.vec
@@ -1017,10 +1054,12 @@ FROM embeddings e
 JOIN chunks c ON c.chunk_id = e.chunk_id
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
 JOIN chats ch ON ch.chat_id = c.chat_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = e.chunk_id
 WHERE m.deleted = 0
   AND c.deleted = 0
   AND ch.enabled = 1
   AND ch.allow_embeddings = 1
+  AND sk.chunk_id IS NULL
 ORDER BY e.chunk_id ASC
 `
 	args := make([]any, 0, 1)
@@ -1073,6 +1112,7 @@ SELECT
 FROM chunks c
 JOIN messages m ON m.chat_id = c.chat_id AND m.msg_id = c.msg_id
 JOIN chats ch ON ch.chat_id = c.chat_id
+LEFT JOIN embedding_skips sk ON sk.chunk_id = c.chunk_id
 WHERE c.chunk_id IN (
 `
 	args := make([]any, 0, len(chunkIDs)+8)
@@ -1089,6 +1129,7 @@ WHERE c.chunk_id IN (
   AND c.deleted = 0
   AND ch.enabled = 1
   AND ch.allow_embeddings = 1
+  AND sk.chunk_id IS NULL
 `
 
 	if req.Filters.FromUnix > 0 {

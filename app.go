@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"asktg/internal/autostart"
 	"asktg/internal/config"
@@ -2155,6 +2156,12 @@ func (a *App) enqueueEmbeddingCandidates(ctx context.Context) {
 		return
 	}
 	for _, item := range candidates {
+		if isMostlyURLMessage(item.Text) {
+			if err := a.store.MarkEmbeddingSkipped(ctx, item.ChunkID, "mostly_url", time.Now().Unix()); err != nil {
+				runtime.LogWarningf(a.ctx, "Embedding skip mark failed chunk=%d err=%v", item.ChunkID, err)
+			}
+			continue
+		}
 		if err := a.store.EnqueueEmbeddingTask(ctx, item.ChunkID, 8); err != nil {
 			runtime.LogWarningf(a.ctx, "Embedding enqueue failed chunk=%d err=%v", item.ChunkID, err)
 		}
@@ -2168,6 +2175,21 @@ func (a *App) processEmbeddingTask(ctx context.Context, client *embeddings.HTTPC
 	}
 	text := strings.TrimSpace(chunk.Text)
 	if text == "" {
+		return nil
+	}
+	if isMostlyURLMessage(text) {
+		if err := a.store.MarkEmbeddingSkipped(ctx, chunk.ChunkID, "mostly_url", time.Now().Unix()); err != nil {
+			runtime.LogWarningf(a.ctx, "Embedding skip mark failed chunk=%d err=%v", chunk.ChunkID, err)
+		}
+		if err := a.store.DeleteEmbedding(ctx, chunk.ChunkID); err != nil {
+			runtime.LogWarningf(a.ctx, "Embedding delete failed chunk=%d err=%v", chunk.ChunkID, err)
+		}
+		if a.vectorIndex != nil {
+			a.vectorIndex.MarkDeleted(chunk.ChunkID)
+			if err := a.vectorIndex.Save(a.vectorGraphPath()); err != nil {
+				runtime.LogWarningf(a.ctx, "vector graph save after url-only skip failed: %v", err)
+			}
+		}
 		return nil
 	}
 	vectors, err := client.Embed(ctx, []string{text})
@@ -2191,6 +2213,50 @@ func (a *App) processEmbeddingTask(ctx context.Context, client *embeddings.HTTPC
 		}
 	}
 	return nil
+}
+
+func isMostlyURLMessage(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	urls := urlfetch.ExtractURLs(trimmed, security.DefaultMaxURLsMessage)
+	if len(urls) == 0 {
+		return false
+	}
+	totalRunes := len([]rune(trimmed))
+	if totalRunes == 0 {
+		return false
+	}
+
+	urlRunes := 0
+	without := trimmed
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		urlRunes += len([]rune(u))
+		without = strings.ReplaceAll(without, u, " ")
+	}
+
+	restLettersDigits := 0
+	for _, r := range without {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			restLettersDigits++
+		}
+	}
+
+	if totalRunes > 0 && float64(urlRunes)/float64(totalRunes) >= 0.90 {
+		return true
+	}
+	if restLettersDigits <= 3 {
+		return true
+	}
+	if totalRunes > 0 && float64(urlRunes)/float64(totalRunes) >= 0.80 && restLettersDigits <= 20 {
+		return true
+	}
+	return false
 }
 
 func (a *App) setSyncStatus(state string, progress int, lastSyncUnix int64) {
