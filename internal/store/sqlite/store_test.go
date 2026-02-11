@@ -101,7 +101,7 @@ func TestSearchByEmbedding(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedStoreData(t, store, ctx)
-	if err := store.SetChatPolicy(ctx, 1, true, "full", true, "lazy"); err != nil {
+	if err := store.SetChatPolicy(ctx, 1, true, "lazy", true, "lazy"); err != nil {
 		t.Fatalf("set chat policy failed: %v", err)
 	}
 
@@ -154,6 +154,24 @@ func TestSearchByEmbedding(t *testing.T) {
 	}
 	if results[0].ChatID != candidates[0].ChatID || results[0].MsgID != candidates[0].MsgID {
 		t.Fatalf("unexpected result: %+v", results[0])
+	}
+}
+
+func TestEmbeddingCandidatesBackfillWhenHistoryFull(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedStoreData(t, store, ctx)
+
+	if err := store.SetChatPolicy(ctx, 1, true, "full", true, "lazy"); err != nil {
+		t.Fatalf("set chat policy failed: %v", err)
+	}
+
+	candidates, err := store.ListEmbeddingCandidates(ctx, 10)
+	if err != nil {
+		t.Fatalf("list embedding candidates failed: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatal("expected historical candidates in backfill mode")
 	}
 }
 

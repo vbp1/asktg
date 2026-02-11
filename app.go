@@ -1532,6 +1532,9 @@ func (a *App) RebuildSemanticIndex() string {
 	if err := a.store.ResetEmbeddings(ctx); err != nil {
 		return fmt.Sprintf("Rebuild failed: %v", err)
 	}
+	if _, err := a.store.BackfillEmbeddingsForEnabledChats(ctx); err != nil {
+		runtime.LogWarningf(a.ctx, "embeddings backfill scope update failed: %v", err)
+	}
 	if a.vectorIndex != nil {
 		if err := a.vectorIndex.Rebuild(nil); err != nil {
 			return fmt.Sprintf("Rebuild failed: %v", err)

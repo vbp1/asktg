@@ -383,12 +383,14 @@ WHERE chat_id = ?
 		return err
 	}
 
-	if allowEmbeddings {
-		if currentAllow == 0 || sinceUnix <= 0 {
-			sinceUnix = time.Now().Unix()
-		}
-	} else {
+	if !allowEmbeddings {
 		sinceUnix = 0
+	} else if strings.EqualFold(strings.TrimSpace(historyMode), "full") {
+		// Backfill mode: allow embedding candidates from the full retained history.
+		sinceUnix = 0
+	} else if currentAllow == 0 || sinceUnix <= 0 {
+		// New-only mode: only embed content from the time embeddings were enabled.
+		sinceUnix = time.Now().Unix()
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -451,6 +453,22 @@ ORDER BY title ASC
 		chats = append(chats, chat)
 	}
 	return chats, rows.Err()
+}
+
+func (s *Store) BackfillEmbeddingsForEnabledChats(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE chats
+SET embeddings_since_unix = 0
+WHERE enabled = 1
+  AND allow_embeddings = 1
+  AND history_mode = 'full'
+  AND embeddings_since_unix != 0
+`)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return int(affected), nil
 }
 
 func (s *Store) UpsertMessage(ctx context.Context, msg domain.Message) error {
