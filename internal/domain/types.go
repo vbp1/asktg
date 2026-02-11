@@ -94,6 +94,16 @@ type EmbeddingsConfig struct {
 	Configured bool   `json:"configured"`
 }
 
+type EmbeddingsTestResult struct {
+	OK         bool   `json:"ok"`
+	BaseURL    string `json:"base_url"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	VectorLen  int    `json:"vector_len"`
+	TookMs     int64  `json:"took_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
 type OnboardingStatus struct {
 	Completed          bool `json:"completed"`
 	TelegramConfigured bool `json:"telegram_configured"`

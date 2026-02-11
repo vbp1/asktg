@@ -779,6 +779,57 @@ func (a *App) SetEmbeddingsConfig(baseURL, model, apiKey string, dimensions int)
 	return nil
 }
 
+func (a *App) TestEmbeddings() (domain.EmbeddingsTestResult, error) {
+	if a.store == nil {
+		return domain.EmbeddingsTestResult{}, errors.New("store is not initialized")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 25*time.Second)
+	defer cancel()
+
+	baseURL, _ := a.store.GetSetting(ctx, "embeddings_base_url", "https://api.openai.com/v1")
+	model, _ := a.store.GetSetting(ctx, "embeddings_model", "text-embedding-3-large")
+	dims, _ := a.store.GetSettingInt(ctx, "embeddings_dims", 3072)
+
+	if a.embedClient == nil {
+		a.configureEmbeddingsFromStore(ctx)
+	}
+	if a.embedClient == nil {
+		return domain.EmbeddingsTestResult{
+			OK:         false,
+			BaseURL:    baseURL,
+			Model:      model,
+			Dimensions: dims,
+			Error:      "embeddings client is not configured",
+		}, nil
+	}
+
+	start := time.Now()
+	vectors, err := a.embedClient.Embed(ctx, []string{"ping"})
+	took := time.Since(start)
+	if err != nil {
+		return domain.EmbeddingsTestResult{
+			OK:         false,
+			BaseURL:    baseURL,
+			Model:      model,
+			Dimensions: dims,
+			TookMs:     took.Milliseconds(),
+			Error:      err.Error(),
+		}, nil
+	}
+	vectorLen := 0
+	if len(vectors) > 0 {
+		vectorLen = len(vectors[0])
+	}
+	return domain.EmbeddingsTestResult{
+		OK:         true,
+		BaseURL:    baseURL,
+		Model:      model,
+		Dimensions: dims,
+		VectorLen:  vectorLen,
+		TookMs:     took.Milliseconds(),
+	}, nil
+}
+
 func (a *App) OnboardingStatus() (domain.OnboardingStatus, error) {
 	if a.store == nil {
 		return domain.OnboardingStatus{}, errors.New("store is not initialized")

@@ -138,6 +138,10 @@ export function TelegramSignIn(arg1, arg2) {
   return window['go']['main']['App']['TelegramSignIn'](arg1, arg2);
 }
 
+export function TestEmbeddings() {
+  return window['go']['main']['App']['TestEmbeddings']();
+}
+
 export function ToggleMCP(arg1) {
   return window['go']['main']['App']['ToggleMCP'](arg1);
 }

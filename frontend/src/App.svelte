@@ -29,6 +29,8 @@
   let embDims = 3072;
   let embAPIKey = "";
   let embConfigured = false;
+  let embTestBusy = false;
+  let embTest = null;
   let autostartEnabled = false;
   let backgroundPaused = false;
   let mcpPort = 0;
@@ -50,6 +52,7 @@
   let applyAllTotal = 0;
 
   $: onboardingIncomplete = Boolean(onboarding && !onboarding.completed);
+  $: searchLocked = Boolean(onboarding && onboarding.enabled_chats < 1);
   $: activeChatFolder = chatFolders.find((f) => f.id === activeChatFolderId) || chatFolders[0] || null;
   $: visibleChats = chatsForFolder(chats, activeChatFolder);
   $: dirtyChatIds = Object.keys(chatEdits).filter((id) => chatEdits[id]?.dirty);
@@ -360,8 +363,8 @@
   }
 
   async function runSearch() {
-    if (onboarding && !onboarding.completed) {
-      errorText = "Complete onboarding first";
+    if (searchLocked) {
+      errorText = "Enable at least one chat (Wizard → Chats & Policies) to search";
       return;
     }
     if (!query.trim()) {
@@ -387,10 +390,6 @@
   }
 
   async function runSyncNow() {
-    if (onboarding && !onboarding.completed) {
-      errorText = "Complete onboarding first";
-      return;
-    }
     syncBusy = true;
     errorText = "";
     try {
@@ -650,6 +649,24 @@
     }
   }
 
+  async function testEmbeddings() {
+    embTestBusy = true;
+    errorText = "";
+    infoText = "";
+    try {
+      embTest = await backend().TestEmbeddings();
+      if (embTest && embTest.ok) {
+        infoText = `Embeddings OK (${embTest.vector_len} dims, ${embTest.took_ms} ms)`;
+      } else if (embTest) {
+        errorText = `Embeddings test failed: ${embTest.error || "unknown error"}`;
+      }
+    } catch (error) {
+      errorText = String(error);
+    } finally {
+      embTestBusy = false;
+    }
+  }
+
   async function rebuildSemanticIndex() {
     maintenanceBusy = true;
     errorText = "";
@@ -741,8 +758,10 @@
         Onboarding wizard
       </button>
     </div>
-    {#if onboardingIncomplete}
-      <p class="mutedLine">Onboarding is incomplete. Search is locked until at least one chat is enabled.</p>
+    {#if searchLocked}
+      <p class="mutedLine">Search is locked until at least one chat is enabled (Wizard → Chats & Policies).</p>
+    {:else if onboardingIncomplete}
+      <p class="mutedLine">Onboarding is not completed (optional). You can keep using the app.</p>
     {/if}
   </section>
 
@@ -763,19 +782,18 @@
         <input
           bind:value={query}
           class="searchInput"
-          disabled={onboardingIncomplete}
           on:keydown={(event) => event.key === "Enter" && runSearch()}
           placeholder="Search messages..."
         />
-        <select bind:value={mode} disabled={onboardingIncomplete}>
+        <select bind:value={mode}>
           <option value="hybrid">Hybrid</option>
           <option value="fts">FTS</option>
         </select>
         <label class="toggle">
-          <input bind:checked={advanced} disabled={onboardingIncomplete} type="checkbox" />
+          <input bind:checked={advanced} type="checkbox" />
           Advanced
         </label>
-        <button on:click={runSearch} disabled={onboardingIncomplete}>
+        <button on:click={runSearch} disabled={loading || searchLocked || !query.trim()}>
           {loading ? "Searching..." : "Search"}
         </button>
       </div>
@@ -836,10 +854,10 @@
         </div>
       {/if}
       <div class="row">
-        <button on:click={runSyncNow} disabled={syncBusy || telegramBusy || onboardingIncomplete}>
+        <button on:click={runSyncNow} disabled={syncBusy || telegramBusy}>
           {syncBusy ? "Syncing..." : "Sync now"}
         </button>
-        <button on:click={toggleBackgroundPause} disabled={maintenanceBusy || telegramBusy || syncBusy || onboardingIncomplete}>
+        <button on:click={toggleBackgroundPause} disabled={maintenanceBusy || telegramBusy || syncBusy}>
           {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
         </button>
       </div>
@@ -887,6 +905,9 @@
         <input bind:value={embAPIKey} type="password" class="pathInput" placeholder="Embeddings API key (leave empty to keep current)" />
         <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy || telegramBusy || syncBusy}>
           {maintenanceBusy ? "Working..." : "Save embeddings config"}
+        </button>
+        <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy || telegramBusy || syncBusy || !embConfigured}>
+          {embTestBusy ? "Testing..." : "Test embeddings"}
         </button>
         <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || telegramBusy || syncBusy}>
           {maintenanceBusy ? "Working..." : "Rebuild semantic index"}

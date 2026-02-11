@@ -70,6 +70,8 @@ export function TelegramSetCredentials(arg1:number,arg2:string):Promise<void>;
 
 export function TelegramSignIn(arg1:string,arg2:string):Promise<domain.TelegramAuthStatus>;
 
+export function TestEmbeddings():Promise<domain.EmbeddingsTestResult>;
+
 export function ToggleMCP(arg1:boolean):Promise<void>;
 
 export function TrayStatus():Promise<string>;
