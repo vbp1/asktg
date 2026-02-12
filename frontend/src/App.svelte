@@ -1122,8 +1122,8 @@
     </div>
     <div class="row wrap navRow">
       <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
-      <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
       <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>
+      <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
     </div>
     {#if searchLocked}
       <p class="mutedLine">Search is locked until at least one chat is enabled (Chats).</p>
