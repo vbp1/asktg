@@ -37,6 +37,12 @@ type SearchRequest struct {
 	Filters SearchFilters `json:"filters"`
 }
 
+type SearchUISettings struct {
+	Mode        string `json:"mode"`
+	ResultLimit string `json:"result_limit"`
+	Advanced    bool   `json:"advanced"`
+}
+
 type SearchResult struct {
 	ChatID           int64   `json:"chat_id"`
 	MsgID            int64   `json:"msg_id"`

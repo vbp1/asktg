@@ -9,7 +9,7 @@
   let chats = [];
   let query = "";
   let mode = "hybrid";
-  let resultLimit = "top10"; // "top5" | "top10" | "all"
+  let resultLimit = "top5"; // "top5" | "top10" | "all"
   let advanced = false;
   let results = [];
   let loading = false;
@@ -501,17 +501,42 @@
     }
   }
 
+  async function refreshSearchUISettings() {
+    if (!backend()?.SearchUISettings) {
+      return;
+    }
+    try {
+      const cfg = await backend().SearchUISettings();
+      if (cfg?.mode) mode = cfg.mode;
+      if (cfg?.result_limit) resultLimit = cfg.result_limit;
+      if (typeof cfg?.advanced === "boolean") advanced = cfg.advanced;
+    } catch {
+      // ignore
+    }
+  }
+
+  async function saveSearchUISettings() {
+    if (!backend()?.SetSearchUISettings) {
+      return;
+    }
+    try {
+      const cfg = await backend().SetSearchUISettings(mode, resultLimit, advanced);
+      if (cfg?.mode) mode = cfg.mode;
+      if (cfg?.result_limit) resultLimit = cfg.result_limit;
+      if (typeof cfg?.advanced === "boolean") advanced = cfg.advanced;
+    } catch {
+      // ignore
+    }
+  }
+
   async function saveSemanticStrictness(next) {
     if (!backend()?.SetSemanticStrictness) {
       return;
     }
     semanticStrictnessBusy = true;
-    errorText = "";
-    infoText = "";
     try {
       await backend().SetSemanticStrictness(next);
       semanticStrictness = next;
-      infoText = "Semantic strictness saved";
     } catch (error) {
       errorText = String(error);
       await refreshSemanticStrictness();
@@ -1035,6 +1060,7 @@
   refreshOnboardingStatus();
   refreshEmbeddingsConfig();
   refreshSemanticStrictness();
+  refreshSearchUISettings();
   refreshAutostart();
   refreshBackgroundPaused();
   refreshDataDir();
@@ -1124,11 +1150,11 @@
           on:keydown={(event) => event.key === "Enter" && runSearch()}
           placeholder="Search messages..."
         />
-        <select bind:value={mode}>
+        <select bind:value={mode} on:change={saveSearchUISettings}>
           <option value="hybrid">Hybrid</option>
           <option value="fts">FTS</option>
         </select>
-        <select bind:value={resultLimit} title="How many results to show">
+        <select bind:value={resultLimit} title="How many results to show" on:change={saveSearchUISettings}>
           <option value="top5">Top 5</option>
           <option value="top10">Top 10</option>
           <option value="all">All</option>
@@ -1186,7 +1212,7 @@
           </div>
         {/if}
         <label class="toggle">
-          <input bind:checked={advanced} type="checkbox" />
+          <input bind:checked={advanced} type="checkbox" on:change={saveSearchUISettings} />
           Advanced
         </label>
         <button on:click={runSearch} disabled={loading || searchLocked || !query.trim()}>

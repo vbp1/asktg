@@ -246,6 +246,22 @@ export namespace domain {
 	        this.match_semantic = source["match_semantic"];
 	    }
 	}
+	export class SearchUISettings {
+	    mode: string;
+	    result_limit: string;
+	    advanced: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SearchUISettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mode = source["mode"];
+	        this.result_limit = source["result_limit"];
+	        this.advanced = source["advanced"];
+	    }
+	}
 	export class TelegramAuthStatus {
 	    configured: boolean;
 	    authorized: boolean;

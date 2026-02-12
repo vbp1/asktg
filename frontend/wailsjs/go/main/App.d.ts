@@ -46,6 +46,8 @@ export function ResumeBackground():Promise<domain.IndexStatus>;
 
 export function Search(arg1:string,arg2:string,arg3:boolean,arg4:Array<number>,arg5:number,arg6:number,arg7:number):Promise<Array<domain.SearchResult>>;
 
+export function SearchUISettings():Promise<domain.SearchUISettings>;
+
 export function SemanticStrictness():Promise<string>;
 
 export function SetAutostartEnabled(arg1:boolean):Promise<boolean>;
@@ -57,6 +59,8 @@ export function SetDataDir(arg1:string):Promise<string>;
 export function SetEmbeddingsConfig(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
 
 export function SetMCPPort(arg1:number):Promise<domain.IndexStatus>;
+
+export function SetSearchUISettings(arg1:string,arg2:string,arg3:boolean):Promise<domain.SearchUISettings>;
 
 export function SetSemanticStrictness(arg1:string):Promise<void>;
 

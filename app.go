@@ -947,6 +947,57 @@ func (a *App) SetSemanticStrictness(level string) error {
 	return a.store.SetSetting(a.ctx, "semantic_strictness", normalizeSemanticStrictness(level))
 }
 
+func (a *App) SearchUISettings() (domain.SearchUISettings, error) {
+	if a.store == nil {
+		return domain.SearchUISettings{}, errors.New("store is not initialized")
+	}
+	mode, err := a.store.GetSetting(a.ctx, "ui_search_mode", "hybrid")
+	if err != nil {
+		mode = "hybrid"
+	}
+	limit, err := a.store.GetSetting(a.ctx, "ui_search_result_limit", "top5")
+	if err != nil {
+		limit = "top5"
+	}
+	advanced, err := a.store.GetSettingBool(a.ctx, "ui_search_advanced", false)
+	if err != nil {
+		advanced = false
+	}
+	return domain.SearchUISettings{
+		Mode:        normalizeSearchUIMode(mode),
+		ResultLimit: normalizeSearchUIResultLimit(limit),
+		Advanced:    advanced,
+	}, nil
+}
+
+func (a *App) SetSearchUISettings(mode string, resultLimit string, advanced bool) (domain.SearchUISettings, error) {
+	if a.store == nil {
+		return domain.SearchUISettings{}, errors.New("store is not initialized")
+	}
+	cleanMode := normalizeSearchUIMode(mode)
+	cleanLimit := normalizeSearchUIResultLimit(resultLimit)
+	if err := a.store.SetSetting(a.ctx, "ui_search_mode", cleanMode); err != nil {
+		return domain.SearchUISettings{}, err
+	}
+	if err := a.store.SetSetting(a.ctx, "ui_search_result_limit", cleanLimit); err != nil {
+		return domain.SearchUISettings{}, err
+	}
+	if advanced {
+		if err := a.store.SetSetting(a.ctx, "ui_search_advanced", "1"); err != nil {
+			return domain.SearchUISettings{}, err
+		}
+	} else {
+		if err := a.store.SetSetting(a.ctx, "ui_search_advanced", "0"); err != nil {
+			return domain.SearchUISettings{}, err
+		}
+	}
+	return domain.SearchUISettings{
+		Mode:        cleanMode,
+		ResultLimit: cleanLimit,
+		Advanced:    advanced,
+	}, nil
+}
+
 func (a *App) OnboardingStatus() (domain.OnboardingStatus, error) {
 	if a.store == nil {
 		return domain.OnboardingStatus{}, errors.New("store is not initialized")
@@ -1243,6 +1294,26 @@ func normalizeSemanticStrictness(level string) string {
 		return clean
 	default:
 		return "similar"
+	}
+}
+
+func normalizeSearchUIMode(mode string) string {
+	clean := strings.ToLower(strings.TrimSpace(mode))
+	switch clean {
+	case "hybrid", "fts":
+		return clean
+	default:
+		return "hybrid"
+	}
+}
+
+func normalizeSearchUIResultLimit(limit string) string {
+	clean := strings.ToLower(strings.TrimSpace(limit))
+	switch clean {
+	case "top5", "top10", "all":
+		return clean
+	default:
+		return "top5"
 	}
 }
 
