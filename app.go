@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -70,12 +71,12 @@ var semanticProfiles = map[string]semanticProfile{
 	// so the defaults must be permissive enough to return *some* semantic candidates, while still
 	// allowing users to tighten it.
 	//
-	// very:   max 1.15 ~= cos >= 0.425
-	// similar max 1.40 ~= cos >= 0.30
-	// weak:   max 1.70 ~= cos >= 0.15
-	"very":    {MaxDistance: 1.15, Slack: 0.15},
-	"similar": {MaxDistance: 1.40, Slack: 0.25},
-	"weak":    {MaxDistance: 1.70, Slack: 0.35},
+	// very:   max 1.40 ~= cos >= 0.30
+	// similar max 1.70 ~= cos >= 0.15
+	// weak:   max 1.90 ~= cos >= 0.05
+	"very":    {MaxDistance: 1.40, Slack: 0.25},
+	"similar": {MaxDistance: 1.70, Slack: 0.35},
+	"weak":    {MaxDistance: 1.90, Slack: 0.45},
 }
 
 // App struct
@@ -115,13 +116,16 @@ type App struct {
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{
+		trayStatus: "initializing",
+	}
 }
 
 // startup is called when the app starts. The context is saved
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.setTrayStatus("initializing")
 	a.cfg = config.Load()
 	if err := os.MkdirAll(a.cfg.DataDir, 0o755); err != nil {
 		panic(err)
@@ -362,6 +366,14 @@ func (a *App) rebuildVectorIndexFromStore(ctx context.Context, persist bool) err
 func (a *App) startWorkers() {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	a.syncCancel = cancel
+
+	if a.store != nil {
+		if reset, err := a.store.ResetRunningEmbeddingTasks(a.ctx, time.Now().Unix()); err != nil {
+			runtime.LogWarningf(a.ctx, "Embedding task reset failed: %v", err)
+		} else if reset > 0 {
+			runtime.LogInfof(a.ctx, "Reset %d stuck embedding tasks", reset)
+		}
+	}
 
 	a.syncWG.Add(1)
 	go func() {
@@ -1290,10 +1302,18 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 		return nil, err
 	}
 	limit := req.Filters.Limit
-	if limit <= 0 || limit > 100 {
+	unlimited := limit == -1
+	if !unlimited && (limit <= 0 || limit > 100) {
 		limit = 25
 	}
-	results := make([]domain.SearchResult, 0, limit)
+	resultCap := len(candidates)
+	if !unlimited && limit < resultCap {
+		resultCap = limit
+	}
+	if resultCap < 0 {
+		resultCap = 0
+	}
+	results := make([]domain.SearchResult, 0, resultCap)
 	for _, candidate := range candidates {
 		nodeID := candidate.ChunkID
 		if nodeID == 0 {
@@ -1319,7 +1339,7 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 		item.Score = distance[nodeID]
 		item.MatchSemantic = true
 		results = append(results, item)
-		if len(results) >= limit {
+		if !unlimited && len(results) >= limit {
 			break
 		}
 	}
@@ -2613,7 +2633,10 @@ func (a *App) processEmbeddingWork(ctx context.Context, client *embeddings.HTTPC
 func (a *App) processEmbeddingTask(ctx context.Context, client *embeddings.HTTPClient, task sqlite.EmbeddingTask) error {
 	chunk, err := a.store.LoadChunkForEmbedding(ctx, task.ChunkID)
 	if err != nil {
-		return nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 	text := strings.TrimSpace(chunk.Text)
 	if text == "" {
@@ -2663,7 +2686,10 @@ func (a *App) processURLEmbeddingTask(ctx context.Context, client *embeddings.HT
 	}
 	doc, err := a.store.LoadURLDocForEmbedding(ctx, urlID)
 	if err != nil {
-		return nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 
 	text := buildURLEmbeddingText(doc)
@@ -2701,7 +2727,10 @@ func (a *App) processFileEmbeddingTask(ctx context.Context, client *embeddings.H
 	}
 	doc, err := a.store.LoadFileDocForEmbedding(ctx, docID)
 	if err != nil {
-		return nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 
 	text := buildFileEmbeddingText(doc)
@@ -2983,7 +3012,8 @@ func fileExists(path string) bool {
 }
 
 func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []domain.SearchResult {
-	if limit <= 0 || limit > 100 {
+	unlimited := limit == -1
+	if !unlimited && (limit <= 0 || limit > 100) {
 		limit = 25
 	}
 	type scored struct {
@@ -3027,8 +3057,16 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 		}
 		return out[i].rrf > out[j].rrf
 	})
-	results := make([]domain.SearchResult, 0, limit)
-	for idx := 0; idx < len(out) && idx < limit; idx++ {
+	resultCap := len(out)
+	if !unlimited && limit < resultCap {
+		resultCap = limit
+	}
+	results := make([]domain.SearchResult, 0, resultCap)
+	maxIdx := len(out)
+	if !unlimited && limit < maxIdx {
+		maxIdx = limit
+	}
+	for idx := 0; idx < maxIdx; idx++ {
 		results = append(results, out[idx].item)
 	}
 	return results

@@ -9,6 +9,7 @@
   let chats = [];
   let query = "";
   let mode = "hybrid";
+  let resultLimit = "top10"; // "top5" | "top10" | "all"
   let advanced = false;
   let results = [];
   let loading = false;
@@ -22,6 +23,7 @@
   let tgPhone = "";
   let tgCode = "";
   let tgPassword = "";
+  let telegramEditMode = false;
   let backupPath = "";
   let restorePath = "";
   let embBaseURL = "";
@@ -34,6 +36,10 @@
   let embProgress = null;
   let embProgressBusy = false;
   let embProgressTimer = null;
+  let statusPollTimer = null;
+  let statusPollBusy = false;
+  let statusPollTick = 0;
+  let embeddingsEditMode = false;
   let semanticStrictness = "similar"; // "very" | "similar" | "weak"
   let semanticStrictnessBusy = false;
   let autostartEnabled = false;
@@ -42,9 +48,11 @@
   let trayStatus = "unknown";
   let dataDirPath = "";
   let dataDirBusy = false;
+  let storageEditMode = false;
   let currentPage = "search";
 
   const THEME_STORAGE_KEY = "asktg.theme";
+  const SELECTED_FOLDER_ID = 1000000000;
   let themePreference = "system"; // "system" | "light" | "dark"
   let themeMediaQuery = null;
 
@@ -73,6 +81,10 @@
     embProgress && embProgress.total_eligible > 0
       ? Math.max(0, Math.min(100, Math.floor((embProgress.embedded / embProgress.total_eligible) * 100)))
       : 0;
+  $: telegramConfigured = Boolean(
+    telegramStatus &&
+      (telegramStatus.configured || telegramStatus.authorized || String(telegramStatus.phone || "").trim() !== "")
+  );
 
   function syncChatEditsFromChats(items) {
     const nextChatsById = {};
@@ -294,6 +306,12 @@
     applyTheme(preference);
   }
 
+  function searchLimitValue() {
+    if (resultLimit === "top5") return 5;
+    if (resultLimit === "all") return -1;
+    return 10;
+  }
+
   async function refreshStatus() {
     try {
       status = await backend().Status();
@@ -321,7 +339,7 @@
         throw new Error("no folders");
       }
       if (!chatFolders.some((f) => f.id === activeChatFolderId)) {
-        activeChatFolderId = chatFolders[0].id;
+        activeChatFolderId = chatFolders.some((f) => f.id === SELECTED_FOLDER_ID) ? SELECTED_FOLDER_ID : chatFolders[0].id;
       }
     } catch (error) {
       // Best-effort: ensure at least "All" + "Выбранные" tabs exist even if Telegram folder API isn't available.
@@ -329,10 +347,10 @@
       const selectedIDs = (chats || []).filter((c) => c.enabled).map((c) => c.chat_id);
       chatFolders = [
         { id: 0, title: "All", chat_ids: allIDs },
-        { id: 1000000000, title: "Выбранные", emoticon: "⭐", chat_ids: selectedIDs },
+        { id: SELECTED_FOLDER_ID, title: "Выбранные", emoticon: "⭐", chat_ids: selectedIDs },
       ];
       if (!chatFolders.some((f) => f.id === activeChatFolderId)) {
-        activeChatFolderId = 0;
+        activeChatFolderId = chatFolders.some((f) => f.id === SELECTED_FOLDER_ID) ? SELECTED_FOLDER_ID : 0;
       }
     }
   }
@@ -340,6 +358,14 @@
   async function refreshTelegramStatus() {
     try {
       telegramStatus = await backend().TelegramAuthStatus();
+      if (!telegramEditMode) {
+        tgPhone = telegramStatus?.phone || "";
+        tgCode = "";
+        tgPassword = "";
+      }
+      if (!telegramStatus?.configured && !telegramStatus?.authorized && !telegramEditMode) {
+        telegramEditMode = true;
+      }
     } catch (error) {
       errorText = String(error);
     }
@@ -348,9 +374,6 @@
   async function refreshOnboardingStatus() {
     try {
       onboarding = await backend().OnboardingStatus();
-      if (onboarding && !onboarding.completed && currentPage === "search") {
-        currentPage = "wizard";
-      }
     } catch (error) {
       errorText = String(error);
     }
@@ -358,6 +381,11 @@
 
   function openPage(page) {
     currentPage = page;
+    if (page === "chats") {
+      if (chatFolders.some((f) => f.id === SELECTED_FOLDER_ID)) {
+        activeChatFolderId = SELECTED_FOLDER_ID;
+      }
+    }
     if (page === "settings") {
       refreshEmbeddingsProgress();
       startEmbeddingsProgressPolling();
@@ -366,14 +394,97 @@
     }
   }
 
+  function startStorageEdit() {
+    storageEditMode = true;
+    errorText = "";
+    infoText = "";
+  }
+
+  async function cancelStorageEdit() {
+    storageEditMode = false;
+    await refreshDataDir();
+  }
+
+  async function applyStorageEdit() {
+    const ok = await applyDataDir();
+    if (ok) {
+      storageEditMode = false;
+    }
+  }
+
+  function startTelegramEdit() {
+    telegramEditMode = true;
+    if (!tgPhone && telegramStatus?.phone) {
+      tgPhone = telegramStatus.phone;
+    }
+    errorText = "";
+    infoText = "";
+  }
+
+  async function cancelTelegramEdit() {
+    telegramEditMode = false;
+    tgCode = "";
+    tgPassword = "";
+    await refreshTelegramStatus();
+  }
+
+  async function applyTelegramEdit() {
+    if (!String(tgPhone || "").trim()) {
+      errorText = "Phone is required";
+      return;
+    }
+    if (String(tgCode || "").trim()) {
+      const ok = await signInTelegram();
+      if (ok) {
+        telegramEditMode = false;
+        tgCode = "";
+        tgPassword = "";
+      }
+      return;
+    }
+    const sent = await requestTelegramCode();
+    if (sent) {
+      infoText = "Code sent. Enter login code and click Apply again.";
+    }
+  }
+
+  function startEmbeddingsEdit() {
+    embeddingsEditMode = true;
+    embAPIKey = "";
+    embTest = null;
+    errorText = "";
+    infoText = "";
+  }
+
+  async function cancelEmbeddingsEdit() {
+    embeddingsEditMode = false;
+    embAPIKey = "";
+    embTest = null;
+    await refreshEmbeddingsConfig();
+  }
+
+  async function applyEmbeddingsEdit() {
+    const ok = await saveEmbeddingsConfig();
+    if (ok) {
+      embeddingsEditMode = false;
+    }
+  }
+
   async function refreshEmbeddingsConfig() {
     try {
       const cfg = await backend().EmbeddingsConfig();
-      embBaseURL = cfg.base_url || "https://api.openai.com/v1";
-      embModel = cfg.model || "text-embedding-3-large";
-      embDims = Number(cfg.dimensions || 3072);
+      if (!embeddingsEditMode) {
+        embBaseURL = cfg.base_url || "https://api.openai.com/v1";
+        embModel = cfg.model || "text-embedding-3-large";
+        embDims = Number(cfg.dimensions || 3072);
+      }
       embConfigured = Boolean(cfg.configured);
-      embAPIKey = "";
+      if (!embeddingsEditMode) {
+        embAPIKey = "";
+      }
+      if (!embConfigured && !embeddingsEditMode) {
+        embeddingsEditMode = true;
+      }
     } catch (error) {
       errorText = String(error);
     }
@@ -409,17 +520,22 @@
     }
   }
 
-  async function refreshEmbeddingsProgress() {
+  async function refreshEmbeddingsProgress(options = {}) {
     if (!backend()?.EmbeddingsProgress) {
       return;
     }
-    embProgressBusy = true;
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      embProgressBusy = true;
+    }
     try {
       embProgress = await backend().EmbeddingsProgress();
     } catch {
       // ignore (progress is best-effort)
     } finally {
-      embProgressBusy = false;
+      if (!silent) {
+        embProgressBusy = false;
+      }
     }
   }
 
@@ -437,7 +553,7 @@
         stopEmbeddingsProgressPolling();
         return;
       }
-      await refreshEmbeddingsProgress();
+      await refreshEmbeddingsProgress({ silent: true });
       if (embeddingsProgressDone(embProgress)) {
         stopEmbeddingsProgressPolling();
       }
@@ -448,6 +564,42 @@
     if (!embProgressTimer) return;
     clearInterval(embProgressTimer);
     embProgressTimer = null;
+  }
+
+  async function refreshLiveStatuses() {
+    if (statusPollBusy) return;
+    statusPollBusy = true;
+    statusPollTick++;
+    try {
+      await refreshStatus();
+      if (currentPage === "settings") {
+        if (statusPollTick % 2 === 0) {
+          await refreshBackgroundPaused();
+          await refreshAutostart();
+        }
+        if (!embeddingsEditMode && !maintenanceBusy && statusPollTick % 4 === 0) {
+          await refreshEmbeddingsConfig();
+        }
+        if (!maintenanceBusy && statusPollTick % 4 === 0) {
+          await refreshEmbeddingsProgress({ silent: true });
+        }
+      }
+    } finally {
+      statusPollBusy = false;
+    }
+  }
+
+  function startStatusPolling() {
+    if (statusPollTimer) return;
+    statusPollTimer = setInterval(async () => {
+      await refreshLiveStatuses();
+    }, 3000);
+  }
+
+  function stopStatusPolling() {
+    if (!statusPollTimer) return;
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
   }
 
   async function refreshAutostart() {
@@ -466,17 +618,15 @@
     }
   }
 
-  async function refreshTrayStatus() {
-    try {
-      trayStatus = await backend().TrayStatus();
-    } catch (error) {
-      errorText = String(error);
-    }
-  }
-
   async function refreshDataDir() {
     try {
-      dataDirPath = await backend().DataDir();
+      const next = await backend().DataDir();
+      if (!storageEditMode) {
+        dataDirPath = next;
+      }
+      if (!String(next || "").trim() && !storageEditMode) {
+        storageEditMode = true;
+      }
     } catch (error) {
       errorText = String(error);
     }
@@ -485,47 +635,58 @@
   async function requestTelegramCode() {
     telegramBusy = true;
     errorText = "";
+    let ok = false;
     try {
       telegramStatus = await backend().TelegramRequestCode(tgPhone);
+      ok = true;
     } catch (error) {
       errorText = String(error);
     } finally {
       telegramBusy = false;
     }
+    return ok;
   }
 
   async function signInTelegram() {
     telegramBusy = true;
     errorText = "";
+    let ok = false;
     try {
       telegramStatus = await backend().TelegramSignIn(tgCode, tgPassword);
       await refreshTelegramStatus();
       await refreshChats();
       await refreshOnboardingStatus();
+      ok = true;
     } catch (error) {
       errorText = String(error);
     } finally {
       telegramBusy = false;
     }
+    return ok;
   }
 
   async function loadTelegramChats() {
     telegramBusy = true;
     errorText = "";
+    let ok = false;
     try {
       chats = await backend().TelegramLoadChats();
+      syncChatEditsFromChats(chats);
+      await refreshChatFolders();
       await refreshStatus();
       await refreshOnboardingStatus();
+      ok = true;
     } catch (error) {
       errorText = String(error);
     } finally {
       telegramBusy = false;
     }
+    return ok;
   }
 
   async function runSearch() {
     if (searchLocked) {
-      errorText = "Enable at least one chat (Wizard → Chats & Policies) to search";
+      errorText = "Enable at least one chat (Chats) to search";
       return;
     }
     if (!query.trim()) {
@@ -541,7 +702,7 @@
         selectedChatIds(),
         0,
         0,
-        25
+        searchLimitValue()
       );
     } catch (error) {
       errorText = String(error);
@@ -659,14 +820,17 @@
     dataDirBusy = true;
     errorText = "";
     infoText = "";
+    let ok = false;
     try {
       infoText = await backend().SetDataDir(dataDirPath);
       await refreshDataDir();
+      ok = true;
     } catch (error) {
       errorText = String(error);
     } finally {
       dataDirBusy = false;
     }
+    return ok;
   }
 
   function selectedChatIds() {
@@ -748,6 +912,11 @@
       await refreshTelegramStatus();
       await refreshChats();
       await refreshOnboardingStatus();
+      await refreshEmbeddingsConfig();
+      await refreshEmbeddingsProgress();
+      await refreshAutostart();
+      await refreshBackgroundPaused();
+      await refreshDataDir();
     } catch (error) {
       errorText = String(error);
     } finally {
@@ -798,16 +967,19 @@
     maintenanceBusy = true;
     errorText = "";
     infoText = "";
+    let ok = false;
     try {
       const dims = Number(embDims);
       await backend().SetEmbeddingsConfig(embBaseURL, embModel, embAPIKey, dims);
       await refreshEmbeddingsConfig();
       infoText = "Embeddings config saved";
+      ok = true;
     } catch (error) {
       errorText = String(error);
     } finally {
       maintenanceBusy = false;
     }
+    return ok;
   }
 
   async function testEmbeddings() {
@@ -865,7 +1037,6 @@
   refreshSemanticStrictness();
   refreshAutostart();
   refreshBackgroundPaused();
-  refreshTrayStatus();
   refreshDataDir();
   refreshChats();
   refreshChatFolders();
@@ -881,19 +1052,27 @@
     }
 
     applyTheme(themePreference);
+    refreshLiveStatuses();
+    startStatusPolling();
 
+    let cleanupThemeListener = null;
     if (window.matchMedia) {
       themeMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
       const handler = () => themePreference === "system" && applyTheme("system");
       if (themeMediaQuery.addEventListener) themeMediaQuery.addEventListener("change", handler);
       else themeMediaQuery.addListener(handler);
 
-      return () => {
+      cleanupThemeListener = () => {
         if (!themeMediaQuery) return;
         if (themeMediaQuery.removeEventListener) themeMediaQuery.removeEventListener("change", handler);
         else themeMediaQuery.removeListener(handler);
       };
     }
+
+    return () => {
+      stopStatusPolling();
+      if (cleanupThemeListener) cleanupThemeListener();
+    };
   });
 </script>
 
@@ -918,14 +1097,10 @@
     <div class="row wrap navRow">
       <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
       <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
-      <button class:active={currentPage === "wizard"} on:click={() => openPage("wizard")}>
-        Onboarding wizard
-      </button>
+      <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>
     </div>
     {#if searchLocked}
-      <p class="mutedLine">Search is locked until at least one chat is enabled (Wizard → Chats & Policies).</p>
-    {:else if onboardingIncomplete}
-      <p class="mutedLine">Onboarding is not completed (optional). You can keep using the app.</p>
+      <p class="mutedLine">Search is locked until at least one chat is enabled (Chats).</p>
     {/if}
   </section>
 
@@ -952,6 +1127,11 @@
         <select bind:value={mode}>
           <option value="hybrid">Hybrid</option>
           <option value="fts">FTS</option>
+        </select>
+        <select bind:value={resultLimit} title="How many results to show">
+          <option value="top5">Top 5</option>
+          <option value="top10">Top 10</option>
+          <option value="all">All</option>
         </select>
         {#if mode === "hybrid"}
           <div class="semanticToggle" title="Насколько строго показывать семантические совпадения. Строже = меньше, но релевантнее.">
@@ -1072,7 +1252,12 @@
             </div>
           {/if}
           <div class="sender">{result.sender}</div>
-          <div class="snippet">{@html snippetToHtml(result.snippet || result.message_text)}</div>
+          <div
+            class="snippet"
+            class:snippetClamp={result.match_semantic && (result.source_type === "url" || result.source_type === "file") && !!result.extracted_snippet}
+          >
+            {@html snippetToHtml(result.snippet || result.message_text)}
+          </div>
           {#if result.source_type === "url"}
             <div class="sender">Source message: {result.message_text}</div>
           {/if}
@@ -1096,6 +1281,7 @@
           <span>Sync: {status.sync_state || "idle"}</span>
           <span>Backfill: {status.backfill_progress}%</span>
           <span>Messages: {status.message_count}</span>
+          <span>Autostart: {autostartEnabled ? "enabled" : "disabled"}</span>
         </div>
       {/if}
       <div class="row">
@@ -1104,6 +1290,9 @@
         </button>
         <button on:click={toggleBackgroundPause} disabled={maintenanceBusy}>
           {maintenanceBusy ? "Working..." : (backgroundPaused ? "Resume background" : "Pause background")}
+        </button>
+        <button on:click={toggleAutostart} disabled={maintenanceBusy}>
+          {maintenanceBusy ? "Working..." : (autostartEnabled ? "Disable autostart" : "Enable autostart")}
         </button>
       </div>
     </section>
@@ -1133,27 +1322,90 @@
     </section>
 
     <section class="panel">
+      <h2>Storage</h2>
+      <div class="row wrap">
+        <input bind:value={dataDirPath} class="pathInput" placeholder="Data directory path" disabled={!storageEditMode} />
+        {#if storageEditMode}
+          <button on:click={browseDataDir} disabled={dataDirBusy || onboardingBusy}>
+            {dataDirBusy ? "Working..." : "Browse data dir"}
+          </button>
+          <button on:click={applyStorageEdit} disabled={dataDirBusy || onboardingBusy || !dataDirPath.trim()}>
+            {dataDirBusy ? "Working..." : "Apply"}
+          </button>
+          <button on:click={cancelStorageEdit} disabled={dataDirBusy || onboardingBusy}>Cancel</button>
+        {:else}
+          <button on:click={startStorageEdit} disabled={dataDirBusy || onboardingBusy}>Change</button>
+        {/if}
+      </div>
+      <p class="mutedLine">If path changes, restart app to apply.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Telegram Account</h2>
+      <div class="tgGrid">
+        <input bind:value={tgPhone} placeholder="Phone (+123...)" disabled={!telegramEditMode} />
+        <input bind:value={tgCode} placeholder="Login code" disabled={!telegramEditMode} />
+        <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" disabled={!telegramEditMode} />
+      </div>
+      <div class="row">
+        {#if telegramEditMode}
+          <button on:click={requestTelegramCode} disabled={telegramBusy || !tgPhone.trim()}>
+            {telegramBusy ? "Working..." : "Send code"}
+          </button>
+          <button on:click={applyTelegramEdit} disabled={telegramBusy || !tgPhone.trim()}>
+            {telegramBusy ? "Working..." : "Apply"}
+          </button>
+          <button on:click={cancelTelegramEdit} disabled={telegramBusy}>Cancel</button>
+        {:else}
+          <button on:click={startTelegramEdit} disabled={telegramBusy}>Change</button>
+        {/if}
+        <button on:click={loadTelegramChats} disabled={telegramBusy || (!telegramEditMode && !telegramConfigured)}>
+          {telegramBusy ? "Working..." : "Load chats"}
+        </button>
+      </div>
+      {#if telegramStatus}
+        <div class="status">
+          <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
+          <span>Authorized: {telegramStatus.authorized ? "yes" : "no"}</span>
+          <span>Code pending: {telegramStatus.awaiting_code ? "yes" : "no"}</span>
+          <span>Phone: {telegramStatus.phone || "n/a"}</span>
+          <span>User: {telegramStatus.user_display || "n/a"}</span>
+        </div>
+      {/if}
+    </section>
+
+    <section class="panel">
       <h2>Maintenance</h2>
       <div class="status">
         <span>Embeddings: {embConfigured ? "configured" : "not configured"}</span>
-        <span>Autostart: {autostartEnabled ? "enabled" : "disabled"}</span>
-      </div>
-      <div class="row">
-        <button on:click={toggleAutostart} disabled={maintenanceBusy}>
-          {maintenanceBusy ? "Working..." : (autostartEnabled ? "Disable autostart" : "Enable autostart")}
-        </button>
       </div>
       <div class="row wrap">
-        <input bind:value={embBaseURL} class="pathInput" placeholder="Embeddings base URL (OpenAI-compatible)" />
-        <input bind:value={embModel} placeholder="Model" />
-        <input bind:value={embDims} type="number" min="1" max="8192" placeholder="Dims" />
-        <input bind:value={embAPIKey} type="password" class="pathInput" placeholder="Embeddings API key (leave empty to keep current)" />
-        <button on:click={saveEmbeddingsConfig} disabled={maintenanceBusy}>
-          {maintenanceBusy ? "Working..." : "Save embeddings config"}
-        </button>
-        <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy || !embConfigured}>
-          {embTestBusy ? "Testing..." : "Test embeddings"}
-        </button>
+        <input
+          bind:value={embBaseURL}
+          class="pathInput"
+          placeholder="Embeddings base URL (OpenAI-compatible)"
+          disabled={!embeddingsEditMode}
+        />
+        <input bind:value={embModel} placeholder="Model" disabled={!embeddingsEditMode} />
+        <input bind:value={embDims} type="number" min="1" max="8192" placeholder="Dims" disabled={!embeddingsEditMode} />
+        <input
+          bind:value={embAPIKey}
+          type="password"
+          class="pathInput"
+          placeholder={embeddingsEditMode ? "Embeddings API key (leave empty to keep current)" : (embConfigured ? "Configured API key" : "Embeddings API key")}
+          disabled={!embeddingsEditMode}
+        />
+        {#if embeddingsEditMode}
+          <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy}>
+            {embTestBusy ? "Testing..." : "Test embeddings"}
+          </button>
+          <button on:click={applyEmbeddingsEdit} disabled={maintenanceBusy}>
+            {maintenanceBusy ? "Working..." : "Apply"}
+          </button>
+          <button on:click={cancelEmbeddingsEdit} disabled={maintenanceBusy}>Cancel</button>
+        {:else}
+          <button on:click={startEmbeddingsEdit} disabled={maintenanceBusy}>Change</button>
+        {/if}
         <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || !embConfigured}>
           {maintenanceBusy ? "Working..." : "Rebuild semantic index"}
         </button>
@@ -1192,60 +1444,9 @@
     </section>
   {/if}
 
-  {#if currentPage === "wizard"}
-    <section class="panel onboardingPanel">
-      <h2>Onboarding Wizard</h2>
-      <p class="mutedLine">Complete Telegram setup, discover chats, and enable at least one chat. Saved Messages stays disabled by default.</p>
-      <div class="row wrap">
-        <input bind:value={dataDirPath} class="pathInput" placeholder="Data directory path" />
-        <button on:click={browseDataDir} disabled={dataDirBusy || onboardingBusy}>
-          {dataDirBusy ? "Working..." : "Browse data dir"}
-        </button>
-        <button on:click={applyDataDir} disabled={dataDirBusy || onboardingBusy || !dataDirPath.trim()}>
-          {dataDirBusy ? "Working..." : "Apply data dir"}
-        </button>
-      </div>
-      <p class="mutedLine">If path changes, restart app to apply.</p>
-      {#if onboarding}
-        <div class="status">
-          <span>Telegram configured: {onboarding.telegram_configured ? "yes" : "no"}</span>
-          <span>Telegram authorized: {onboarding.telegram_authorized ? "yes" : "no"}</span>
-          <span>Chats discovered: {onboarding.chats_discovered}</span>
-          <span>Enabled chats: {onboarding.enabled_chats}</span>
-        </div>
-        <div class="row">
-          <button on:click={completeOnboarding} disabled={onboardingBusy || onboarding.enabled_chats < 1}>
-            {onboardingBusy ? "Finishing..." : "Complete onboarding"}
-          </button>
-        </div>
-      {/if}
-    </section>
-
+  {#if currentPage === "chats"}
     <section class="panel">
-      <h2>Telegram Setup</h2>
-      <div class="tgGrid">
-        <input bind:value={tgPhone} placeholder="Phone (+123...)" />
-        <input bind:value={tgCode} placeholder="Login code" />
-        <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" />
-      </div>
-      <div class="row">
-        <button on:click={requestTelegramCode} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Send code"}</button>
-        <button on:click={signInTelegram} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Sign in"}</button>
-        <button on:click={loadTelegramChats} disabled={telegramBusy}>{telegramBusy ? "Working..." : "Load chats"}</button>
-      </div>
-      {#if telegramStatus}
-        <div class="status">
-          <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
-          <span>Authorized: {telegramStatus.authorized ? "yes" : "no"}</span>
-          <span>Code pending: {telegramStatus.awaiting_code ? "yes" : "no"}</span>
-          <span>Phone: {telegramStatus.phone || "n/a"}</span>
-          <span>User: {telegramStatus.user_display || "n/a"}</span>
-        </div>
-      {/if}
-    </section>
-
-    <section class="panel">
-      <h2>Chats & Policies</h2>
+      <h2>Chats</h2>
       {#if chatFolders.length > 0}
         <div class="folderTabs">
           {#each chatFolders as folder (folder.id)}

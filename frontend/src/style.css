@@ -666,6 +666,13 @@ button:disabled {
   line-height: 1.45;
 }
 
+.snippetClamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .snippet mark {
   background: var(--highlight-bg);
   color: inherit;

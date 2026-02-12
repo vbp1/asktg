@@ -961,6 +961,21 @@ func (s *Store) ResetEmbeddings(ctx context.Context) error {
 	return tx.Commit()
 }
 
+func (s *Store) ResetRunningEmbeddingTasks(ctx context.Context, nowUnix int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    next_run_at = ?
+WHERE state = 'running'
+  AND type IN ('embed_chunk','embed_url','embed_file')
+`, nowUnix)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
 func (s *Store) EnableEmbeddingsForEnabledChats(ctx context.Context) (int, error) {
 	nowUnix := time.Now().Unix()
 	res, err := s.db.ExecContext(ctx, `
@@ -1004,16 +1019,35 @@ func (s *Store) EnqueueEmbeddingTask(ctx context.Context, chunkID int64, priorit
 	if err != nil {
 		return err
 	}
+	encodedPayload := string(encoded)
 
-	var exists int
+	var (
+		taskID int64
+		state  string
+	)
 	if err := s.db.QueryRowContext(ctx, `
-SELECT 1
+SELECT task_id, state
 FROM tasks
 WHERE type = 'embed_chunk'
   AND payload = ?
+ORDER BY created_at DESC
 LIMIT 1
-`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
-		return nil
+`, encodedPayload).Scan(&taskID, &state); err == nil {
+		state = strings.ToLower(strings.TrimSpace(state))
+		if state == "pending" || state == "running" {
+			return nil
+		}
+		nowUnix := time.Now().Unix()
+		_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    attempts = 0,
+    next_run_at = ?,
+    priority = ?,
+    created_at = ?
+WHERE task_id = ?
+`, nowUnix, priority, nowUnix, taskID)
+		return err
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -1022,7 +1056,7 @@ LIMIT 1
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
 VALUES('embed_chunk', ?, 'pending', 0, ?, ?, ?)
-`, string(encoded), nowUnix, priority, nowUnix)
+`, encodedPayload, nowUnix, priority, nowUnix)
 	return err
 }
 
@@ -1035,16 +1069,35 @@ func (s *Store) EnqueueURLEmbeddingTask(ctx context.Context, urlID int64, priori
 	if err != nil {
 		return err
 	}
+	encodedPayload := string(encoded)
 
-	var exists int
+	var (
+		taskID int64
+		state  string
+	)
 	if err := s.db.QueryRowContext(ctx, `
-SELECT 1
+SELECT task_id, state
 FROM tasks
 WHERE type = 'embed_url'
   AND payload = ?
+ORDER BY created_at DESC
 LIMIT 1
-`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
-		return nil
+`, encodedPayload).Scan(&taskID, &state); err == nil {
+		state = strings.ToLower(strings.TrimSpace(state))
+		if state == "pending" || state == "running" {
+			return nil
+		}
+		nowUnix := time.Now().Unix()
+		_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    attempts = 0,
+    next_run_at = ?,
+    priority = ?,
+    created_at = ?
+WHERE task_id = ?
+`, nowUnix, priority, nowUnix, taskID)
+		return err
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -1053,7 +1106,7 @@ LIMIT 1
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
 VALUES('embed_url', ?, 'pending', 0, ?, ?, ?)
-`, string(encoded), nowUnix, priority, nowUnix)
+`, encodedPayload, nowUnix, priority, nowUnix)
 	return err
 }
 
@@ -1066,16 +1119,35 @@ func (s *Store) EnqueueFileEmbeddingTask(ctx context.Context, chatID int64, msgI
 	if err != nil {
 		return err
 	}
+	encodedPayload := string(encoded)
 
-	var exists int
+	var (
+		taskID int64
+		state  string
+	)
 	if err := s.db.QueryRowContext(ctx, `
-SELECT 1
+SELECT task_id, state
 FROM tasks
 WHERE type = 'embed_file'
   AND payload = ?
+ORDER BY created_at DESC
 LIMIT 1
-`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
-		return nil
+`, encodedPayload).Scan(&taskID, &state); err == nil {
+		state = strings.ToLower(strings.TrimSpace(state))
+		if state == "pending" || state == "running" {
+			return nil
+		}
+		nowUnix := time.Now().Unix()
+		_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    attempts = 0,
+    next_run_at = ?,
+    priority = ?,
+    created_at = ?
+WHERE task_id = ?
+`, nowUnix, priority, nowUnix, taskID)
+		return err
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -1084,7 +1156,7 @@ LIMIT 1
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO tasks(type, payload, state, attempts, next_run_at, priority, created_at)
 VALUES('embed_file', ?, 'pending', 0, ?, ?, ?)
-`, string(encoded), nowUnix, priority, nowUnix)
+`, encodedPayload, nowUnix, priority, nowUnix)
 	return err
 }
 
@@ -1189,6 +1261,7 @@ WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND length(trim(c.text)) > 0
   AND e.chunk_id IS NULL
   AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
@@ -1223,6 +1296,7 @@ WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND length(trim(c.text)) > 0
   AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `).Scan(&totalEligible); err != nil {
@@ -1276,6 +1350,7 @@ WHERE ch.enabled = 1
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND length(trim(c.text)) > 0
   AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `).Scan(&embedded); err != nil {
@@ -1353,6 +1428,7 @@ WHERE c.chunk_id = ?
   AND ch.allow_embeddings = 1
   AND c.deleted = 0
   AND m.deleted = 0
+  AND length(trim(c.text)) > 0
   AND sk.chunk_id IS NULL
   AND (ch.embeddings_since_unix = 0 OR m.ts >= ch.embeddings_since_unix)
 `, chunkID).Scan(&item.ChunkID, &item.ChatID, &item.MsgID, &item.Text)
@@ -1750,7 +1826,8 @@ SELECT
 	m.text,
 	d.filename,
 	d.mime,
-	d.size
+	d.size,
+	substr(d.extracted_text, 1, 4000) AS extracted_snippet
 FROM file_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
@@ -1804,8 +1881,9 @@ WHERE d.doc_id IN (
 	results := make(map[int64]domain.SearchResult, len(docIDs))
 	for rows.Next() {
 		var (
-			docID int64
-			item  domain.SearchResult
+			docID     int64
+			extracted string
+			item      domain.SearchResult
 		)
 		if err := rows.Scan(
 			&docID,
@@ -1818,12 +1896,16 @@ WHERE d.doc_id IN (
 			&item.FileName,
 			&item.FileMime,
 			&item.FileSize,
+			&extracted,
 		); err != nil {
 			return nil, err
 		}
 		item.SourceType = "file"
 		item.FileDocID = docID
-		if strings.TrimSpace(item.FileName) != "" {
+		item.ExtractedSnippet = compactExtractedSnippet(extracted)
+		if item.ExtractedSnippet != "" {
+			item.Snippet = item.ExtractedSnippet
+		} else if strings.TrimSpace(item.FileName) != "" {
 			item.Snippet = item.FileName
 		} else {
 			item.Snippet = item.MessageText
@@ -1850,7 +1932,8 @@ SELECT
 	d.url,
 	d.final_url,
 	d.title,
-	d.content_type
+	d.content_type,
+	substr(d.extracted_text, 1, 4000) AS extracted_snippet
 FROM url_docs d
 JOIN messages m ON m.chat_id = d.chat_id AND m.msg_id = d.msg_id
 JOIN chats ch ON ch.chat_id = d.chat_id
@@ -1904,8 +1987,9 @@ WHERE d.url_id IN (
 	results := make(map[int64]domain.SearchResult, len(urlIDs))
 	for rows.Next() {
 		var (
-			urlID int64
-			item  domain.SearchResult
+			urlID     int64
+			extracted string
+			item      domain.SearchResult
 		)
 		if err := rows.Scan(
 			&urlID,
@@ -1919,11 +2003,15 @@ WHERE d.url_id IN (
 			&item.URLFinal,
 			&item.URLTitle,
 			&item.URLMime,
+			&extracted,
 		); err != nil {
 			return nil, err
 		}
 		item.SourceType = "url"
-		if strings.TrimSpace(item.URLTitle) != "" {
+		item.ExtractedSnippet = compactExtractedSnippet(extracted)
+		if item.ExtractedSnippet != "" {
+			item.Snippet = item.ExtractedSnippet
+		} else if strings.TrimSpace(item.URLTitle) != "" {
 			item.Snippet = item.URLTitle
 		} else {
 			item.Snippet = item.MessageText
@@ -2019,7 +2107,8 @@ func (s *Store) SearchByEmbedding(ctx context.Context, req domain.SearchRequest,
 		maxCandidates = 2000
 	}
 	limit := req.Filters.Limit
-	if limit <= 0 || limit > 100 {
+	unlimited := limit == -1
+	if !unlimited && (limit <= 0 || limit > 100) {
 		limit = 25
 	}
 
@@ -2067,7 +2156,14 @@ WHERE m.deleted = 0
 	}
 	defer rows.Close()
 
-	results := make([]domain.SearchResult, 0, limit)
+	resultCap := maxCandidates
+	if !unlimited && limit < resultCap {
+		resultCap = limit
+	}
+	if resultCap < 0 {
+		resultCap = 0
+	}
+	results := make([]domain.SearchResult, 0, resultCap)
 	for rows.Next() {
 		var (
 			blob []byte
@@ -2095,7 +2191,7 @@ WHERE m.deleted = 0
 		}
 		return results[i].Score < results[j].Score
 	})
-	if len(results) > limit {
+	if !unlimited && len(results) > limit {
 		results = results[:limit]
 	}
 	return results, nil
@@ -2590,7 +2686,8 @@ func (s *Store) Search(ctx context.Context, req domain.SearchRequest) ([]domain.
 	}
 
 	limit := req.Filters.Limit
-	if limit <= 0 || limit > 100 {
+	unlimited := limit == -1
+	if !unlimited && (limit <= 0 || limit > 100) {
 		limit = 25
 	}
 
@@ -2634,8 +2731,11 @@ WHERE fts_chunks MATCH ?
 		query += " AND fts_chunks.chat_id IN (" + strings.Join(placeholders, ",") + ")"
 	}
 
-	query += " ORDER BY rank ASC, fts_chunks.ts DESC LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY rank ASC, fts_chunks.ts DESC"
+	if !unlimited {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -2643,7 +2743,11 @@ WHERE fts_chunks MATCH ?
 	}
 	defer rows.Close()
 
-	merged := make(map[string]domain.SearchResult, limit)
+	mergedCap := 64
+	if !unlimited {
+		mergedCap = limit
+	}
+	merged := make(map[string]domain.SearchResult, mergedCap)
 	for rows.Next() {
 		var item domain.SearchResult
 		if err := rows.Scan(&item.ChatID, &item.MsgID, &item.Timestamp, &item.ChatTitle, &item.Sender, &item.MessageText, &item.Snippet, &item.Score); err != nil {
@@ -2698,8 +2802,11 @@ WHERE fts_url_docs MATCH ?
 			}
 			urlQuery += " AND m.chat_id IN (" + strings.Join(placeholders, ",") + ")"
 		}
-		urlQuery += " ORDER BY rank ASC, m.ts DESC LIMIT ?"
-		urlArgs = append(urlArgs, limit)
+		urlQuery += " ORDER BY rank ASC, m.ts DESC"
+		if !unlimited {
+			urlQuery += " LIMIT ?"
+			urlArgs = append(urlArgs, limit)
+		}
 
 		urlRows, queryErr := s.db.QueryContext(ctx, urlQuery, urlArgs...)
 		if queryErr != nil {
@@ -2779,8 +2886,11 @@ WHERE fts_file_docs MATCH ?
 		}
 		fileQuery += " AND m.chat_id IN (" + strings.Join(placeholders, ",") + ")"
 	}
-	fileQuery += " ORDER BY rank ASC, m.ts DESC LIMIT ?"
-	fileArgs = append(fileArgs, limit)
+	fileQuery += " ORDER BY rank ASC, m.ts DESC"
+	if !unlimited {
+		fileQuery += " LIMIT ?"
+		fileArgs = append(fileArgs, limit)
+	}
 
 	fileRows, queryErr := s.db.QueryContext(ctx, fileQuery, fileArgs...)
 	if queryErr != nil {
@@ -2830,7 +2940,7 @@ WHERE fts_file_docs MATCH ?
 		}
 		return results[i].Score < results[j].Score
 	})
-	if len(results) > limit {
+	if !unlimited && len(results) > limit {
 		results = results[:limit]
 	}
 	return results, nil
@@ -2996,6 +3106,20 @@ func cosineSimilarity(a, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func compactExtractedSnippet(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	const maxRunes = 1200
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 func boolToInt(v bool) int {

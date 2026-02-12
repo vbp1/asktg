@@ -202,6 +202,7 @@ export namespace domain {
 	    sender: string;
 	    snippet: string;
 	    message_text: string;
+	    extracted_snippet?: string;
 	    source_type?: string;
 	    url?: string;
 	    url_final?: string;
@@ -229,6 +230,7 @@ export namespace domain {
 	        this.sender = source["sender"];
 	        this.snippet = source["snippet"];
 	        this.message_text = source["message_text"];
+	        this.extracted_snippet = source["extracted_snippet"];
 	        this.source_type = source["source_type"];
 	        this.url = source["url"];
 	        this.url_final = source["url_final"];
