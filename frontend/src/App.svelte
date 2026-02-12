@@ -50,6 +50,7 @@
   let dataDirBusy = false;
   let storageEditMode = false;
   let currentPage = "search";
+  let settingsTab = "runtime"; // "runtime" | "mcp" | "storage" | "telegram" | "embeddings" | "backup"
 
   const THEME_STORAGE_KEY = "asktg.theme";
   const SELECTED_FOLDER_ID = 1000000000;
@@ -1300,6 +1301,19 @@
 
   {#if currentPage === "settings"}
     <section class="panel">
+      <h2>Settings</h2>
+      <div class="folderTabs">
+        <button class:active={settingsTab === "runtime"} on:click={() => (settingsTab = "runtime")}>Runtime</button>
+        <button class:active={settingsTab === "mcp"} on:click={() => (settingsTab = "mcp")}>MCP</button>
+        <button class:active={settingsTab === "storage"} on:click={() => (settingsTab = "storage")}>Storage</button>
+        <button class:active={settingsTab === "telegram"} on:click={() => (settingsTab = "telegram")}>Telegram</button>
+        <button class:active={settingsTab === "embeddings"} on:click={() => (settingsTab = "embeddings")}>Embeddings</button>
+        <button class:active={settingsTab === "backup"} on:click={() => (settingsTab = "backup")}>Backup</button>
+      </div>
+    </section>
+
+    {#if settingsTab === "runtime"}
+    <section class="panel">
       <h2>Runtime</h2>
       {#if status}
         <div class="status">
@@ -1322,7 +1336,9 @@
         </button>
       </div>
     </section>
+    {/if}
 
+    {#if settingsTab === "mcp"}
     <section class="panel">
       <h2>MCP</h2>
       {#if status}
@@ -1346,7 +1362,9 @@
         </button>
       </div>
     </section>
+    {/if}
 
+    {#if settingsTab === "storage"}
     <section class="panel">
       <h2>Storage</h2>
       <div class="row wrap">
@@ -1365,7 +1383,9 @@
       </div>
       <p class="mutedLine">If path changes, restart app to apply.</p>
     </section>
+    {/if}
 
+    {#if settingsTab === "telegram"}
     <section class="panel">
       <h2>Telegram Account</h2>
       <div class="tgGrid">
@@ -1399,9 +1419,11 @@
         </div>
       {/if}
     </section>
+    {/if}
 
+    {#if settingsTab === "embeddings"}
     <section class="panel">
-      <h2>Maintenance</h2>
+      <h2>Embeddings</h2>
       <div class="status">
         <span>Embeddings: {embConfigured ? "configured" : "not configured"}</span>
       </div>
@@ -1452,22 +1474,29 @@
           <progress max="100" value={embProgressPercent}></progress>
         </div>
       {/if}
-      <div class="row wrap">
-        <input bind:value={backupPath} class="pathInput" placeholder="Backup path (.zip) or folder (optional)" />
-        <button on:click={createBackup} disabled={maintenanceBusy}>
-          {maintenanceBusy ? "Working..." : "Create backup"}
-        </button>
-      </div>
-      <div class="row wrap">
-        <input bind:value={restorePath} class="pathInput" placeholder="Restore from backup .zip path" />
-        <button on:click={restoreBackup} disabled={maintenanceBusy}>
-          {maintenanceBusy ? "Working..." : "Restore backup"}
-        </button>
-        <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy}>
-          {maintenanceBusy ? "Working..." : "Purge all data"}
-        </button>
-      </div>
     </section>
+    {/if}
+
+    {#if settingsTab === "backup"}
+      <section class="panel">
+        <h2>Backup</h2>
+        <div class="row wrap">
+          <input bind:value={backupPath} class="pathInput" placeholder="Backup path (.zip) or folder (optional)" />
+          <button on:click={createBackup} disabled={maintenanceBusy}>
+            {maintenanceBusy ? "Working..." : "Create backup"}
+          </button>
+        </div>
+        <div class="row wrap">
+          <input bind:value={restorePath} class="pathInput" placeholder="Restore from backup .zip path" />
+          <button on:click={restoreBackup} disabled={maintenanceBusy}>
+            {maintenanceBusy ? "Working..." : "Restore backup"}
+          </button>
+          <button class="danger" on:click={purgeAllData} disabled={maintenanceBusy}>
+            {maintenanceBusy ? "Working..." : "Purge all data"}
+          </button>
+        </div>
+      </section>
+    {/if}
   {/if}
 
   {#if currentPage === "chats"}
