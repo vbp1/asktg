@@ -213,6 +213,7 @@ export namespace domain {
 	    file_size?: number;
 	    file_doc_id?: number;
 	    score: number;
+	    semantic_similarity?: number;
 	    deep_link?: string;
 	    match_fts?: boolean;
 	    match_semantic?: boolean;
@@ -241,6 +242,7 @@ export namespace domain {
 	        this.file_size = source["file_size"];
 	        this.file_doc_id = source["file_doc_id"];
 	        this.score = source["score"];
+	        this.semantic_similarity = source["semantic_similarity"];
 	        this.deep_link = source["deep_link"];
 	        this.match_fts = source["match_fts"];
 	        this.match_semantic = source["match_semantic"];

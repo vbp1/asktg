@@ -30,3 +30,32 @@ func TestFuseByRRFRecencyBoost(t *testing.T) {
 		t.Fatalf("expected recent result first, got chat=%d msg=%d", fused[0].ChatID, fused[0].MsgID)
 	}
 }
+
+func TestFuseByRRFKeepsSemanticSimilarity(t *testing.T) {
+	fts := domain.SearchResult{
+		ChatID:    303,
+		MsgID:     9,
+		Timestamp: time.Now().Unix(),
+		Snippet:   "fts snippet",
+		MatchFTS:  true,
+	}
+	semantic := domain.SearchResult{
+		ChatID:             303,
+		MsgID:              9,
+		Timestamp:          fts.Timestamp,
+		Snippet:            "semantic snippet",
+		MatchSemantic:      true,
+		SemanticSimilarity: 0.8123,
+	}
+
+	fused := fuseByRRF([]domain.SearchResult{fts}, []domain.SearchResult{semantic}, 10)
+	if len(fused) != 1 {
+		t.Fatalf("expected one fused result, got %d", len(fused))
+	}
+	if !fused[0].MatchSemantic {
+		t.Fatalf("expected fused result to keep semantic flag")
+	}
+	if fused[0].SemanticSimilarity != semantic.SemanticSimilarity {
+		t.Fatalf("expected semantic similarity %.4f, got %.4f", semantic.SemanticSimilarity, fused[0].SemanticSimilarity)
+	}
+}

@@ -1335,6 +1335,17 @@ func filterSemanticCandidates(candidates []vector.Candidate, profile semanticPro
 	return out
 }
 
+func cosineSimilarityFromSquaredL2(distance float64) float64 {
+	similarity := 1.0 - (distance / 2.0)
+	if similarity > 1 {
+		return 1
+	}
+	if similarity < -1 {
+		return -1
+	}
+	return similarity
+}
+
 func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchRequest, candidates []vector.Candidate) ([]domain.SearchResult, error) {
 	msgChunkIDs := make([]int64, 0, len(candidates))
 	urlIDs := make([]int64, 0, len(candidates))
@@ -1408,6 +1419,7 @@ func (a *App) lookupVectorCandidates(ctx context.Context, req domain.SearchReque
 			continue
 		}
 		item.Score = distance[nodeID]
+		item.SemanticSimilarity = cosineSimilarityFromSquaredL2(item.Score)
 		item.MatchSemantic = true
 		results = append(results, item)
 		if !unlimited && len(results) >= limit {
@@ -3106,6 +3118,11 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 			}
 			if current.item.Snippet == "" {
 				current.item.Snippet = item.Snippet
+			}
+			if item.MatchSemantic {
+				if !current.item.MatchSemantic || item.SemanticSimilarity > current.item.SemanticSimilarity {
+					current.item.SemanticSimilarity = item.SemanticSimilarity
+				}
 			}
 			current.item.MatchFTS = current.item.MatchFTS || item.MatchFTS
 			current.item.MatchSemantic = current.item.MatchSemantic || item.MatchSemantic
