@@ -1,5 +1,6 @@
 <script>
   import { onMount } from "svelte";
+  import topbarIcon from "./assets/topbar-icon.jpg";
 
   const backend = () => window?.go?.main?.App;
 
@@ -1106,9 +1107,9 @@
 <main class="layout">
   <section class="hero">
     <div class="heroHeader">
-      <div>
+      <div class="heroBrand">
+        <img class="heroLogo" src={topbarIcon} alt="App icon" />
         <h1>Telegram Sidecar Search</h1>
-        <p>Local-first FTS + Hybrid search with read-only MCP endpoint.</p>
       </div>
       <div class="heroControls">
         <label>
@@ -1121,6 +1122,9 @@
         </label>
       </div>
     </div>
+  </section>
+
+  <section class="stickyTabs">
     <div class="row wrap navRow">
       <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
       <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>

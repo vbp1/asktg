@@ -94,6 +94,23 @@ body {
   gap: 12px;
 }
 
+.heroBrand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.heroLogo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  flex-shrink: 0;
+}
+
 .heroControls {
   display: flex;
   gap: 8px;
@@ -116,11 +133,6 @@ body {
   margin: 0 0 4px;
   font-size: 24px;
   font-weight: 600;
-}
-
-.hero p {
-  margin: 0;
-  color: var(--muted);
 }
 
 h2 {
@@ -158,17 +170,22 @@ h2 {
   flex-wrap: wrap;
 }
 
-.navRow {
-  margin-top: 12px;
+.stickyTabs {
+  position: sticky;
+  top: 8px;
+  z-index: 30;
+  background: var(--bg);
+  padding-top: 2px;
 }
 
 .navRow {
   display: flex;
   gap: 0;
-  border-bottom: 1px solid var(--border);
-  margin-left: -6px;
-  margin-right: -6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
   padding: 0 6px;
+  box-shadow: var(--shadow);
 }
 
 .navRow button {
@@ -191,6 +208,10 @@ h2 {
   color: var(--text);
   border-bottom-color: var(--accent);
   font-weight: 600;
+}
+
+.stickyTabs .mutedLine {
+  margin-top: 8px;
 }
 
 input,
@@ -722,6 +743,10 @@ button:focus {
   .enumField,
   .switchWrap {
     min-width: 0;
+  }
+
+  .stickyTabs {
+    top: 0;
   }
 }
 
