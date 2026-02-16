@@ -298,6 +298,12 @@
     return u.includes(".pdf");
   }
 
+  function formatSemanticSimilarity(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return "";
+    return Math.max(-1, Math.min(1, numeric)).toFixed(3);
+  }
+
   function saveThemePreference(preference) {
     themePreference = preference;
     try {
@@ -1105,36 +1111,39 @@
 </script>
 
 <main class="layout">
-  <section class="hero">
-    <div class="heroHeader">
-      <div class="heroBrand">
-        <img class="heroLogo" src={topbarIcon} alt="App icon" />
-        <h1>Telegram Sidecar Search</h1>
+  <div class="topChrome">
+    <section class="hero">
+      <div class="heroHeader">
+        <div class="heroBrand">
+          <img class="heroLogo" src={topbarIcon} alt="App icon" />
+          <h1>Telegram Sidecar Search</h1>
+        </div>
+        <div class="heroControls">
+          <label>
+            Theme
+            <select bind:value={themePreference} on:change={(e) => saveThemePreference(e.currentTarget.value)}>
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+        </div>
       </div>
-      <div class="heroControls">
-        <label>
-          Theme
-          <select bind:value={themePreference} on:change={(e) => saveThemePreference(e.currentTarget.value)}>
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
+    </section>
+
+    <section class="stickyTabs">
+      <div class="row wrap navRow">
+        <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
+        <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>
+        <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
       </div>
-    </div>
-  </section>
+      {#if searchLocked}
+        <p class="mutedLine">Search is locked until at least one chat is enabled (Chats).</p>
+      {/if}
+    </section>
+  </div>
 
-  <section class="stickyTabs">
-    <div class="row wrap navRow">
-      <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
-      <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>
-      <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
-    </div>
-    {#if searchLocked}
-      <p class="mutedLine">Search is locked until at least one chat is enabled (Chats).</p>
-    {/if}
-  </section>
-
+  <div class="contentScroll">
   {#if errorText}
     <section class="panel">
       <div class="error">{errorText}</div>
@@ -1264,6 +1273,11 @@
               {/if}
               {#if result.match_semantic}
                 <span class="badge semantic">Semantic</span>
+                {#if formatSemanticSimilarity(result.semantic_similarity)}
+                  <span class="semanticSimilarity" title="Cosine similarity">
+                    sim: {formatSemanticSimilarity(result.semantic_similarity)}
+                  </span>
+                {/if}
               {/if}
             </div>
             <small>{new Date(result.timestamp * 1000).toLocaleString()}</small>
@@ -1683,4 +1697,5 @@
       </div>
     </section>
   {/if}
+  </div>
 </main>
