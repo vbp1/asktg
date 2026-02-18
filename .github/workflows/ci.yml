@@ -45,11 +45,15 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Run frontend tests (if configured)
+        working-directory: frontend
+        run: npm run test --if-present
+
       - name: Lint (go vet)
         run: go vet ./...
 
-      - name: Run tests
-        run: go test ./internal/... -count=1
+      - name: Run Go tests
+        run: go test ./... -count=1
 
   gitleaks:
     name: Gitleaks (<=3m)
