@@ -16,8 +16,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Quality (<=3m)
+  version:
+    name: Resolve Version
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.resolve.outputs.version }}
+      app_version_safe: ${{ steps.resolve.outputs.version_safe }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve app version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(bash scripts/resolve_version.sh)"
+          echo "Resolved version: ${version}"
+
+  go-check:
+    name: Go Checks (<=3m)
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -29,6 +49,29 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Create minimal frontend dist for go:embed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p frontend/dist
+          if [[ ! -f frontend/dist/index.html ]]; then
+            echo "<!doctype html><html><body>stub</body></html>" > frontend/dist/index.html
+          fi
+
+      - name: Lint (go vet)
+        run: go vet ./...
+
+      - name: Run Go tests
+        run: go test ./... -count=1
+
+  frontend-check:
+    name: Frontend Checks (<=3m)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -48,12 +91,6 @@ jobs:
       - name: Run frontend tests (if configured)
         working-directory: frontend
         run: npm run test --if-present
-
-      - name: Lint (go vet)
-        run: go vet ./...
-
-      - name: Run Go tests
-        run: go test ./... -count=1
 
   gitleaks:
     name: Gitleaks (<=3m)
@@ -76,11 +113,15 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_windows == true }}
     timeout-minutes: 15
     needs:
-      - quality
+      - version
+      - go-check
+      - frontend-check
       - gitleaks
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -109,12 +150,20 @@ jobs:
           $gopath = go env GOPATH
           "$gopath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Show build version
+        run: echo "Building version ${{ needs.version.outputs.app_version }}"
+
       - name: Build app + installer
-        run: wails build -clean -platform windows/amd64 -nsis
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          $ldflags = "-X asktg/internal/buildinfo.Version=$env:APP_VERSION"
+          wails build -clean -platform windows/amd64 -nsis -ldflags "$ldflags"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: asktg-windows-build
+          name: asktg-windows-${{ needs.version.outputs.app_version_safe }}
           path: build/bin/**
           if-no-files-found: error

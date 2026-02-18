@@ -25,6 +25,7 @@ import (
 	"unicode"
 
 	"asktg/internal/autostart"
+	"asktg/internal/buildinfo"
 	"asktg/internal/config"
 	"asktg/internal/domain"
 	"asktg/internal/embeddings"
@@ -1608,7 +1609,7 @@ func (a *App) CreateBackup(destination string) (string, error) {
 		"created_at":   time.Now().UTC().Format(time.RFC3339),
 		"db_file":      "app.db",
 		"includes_vec": fileExists(graphPath),
-		"version":      "0.1.0",
+		"version":      buildinfo.Version,
 	}
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

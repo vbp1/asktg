@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"asktg/internal/buildinfo"
 	"asktg/internal/domain"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,7 +56,7 @@ func (s *Server) Start(port int) error {
 		return err
 	}
 
-	impl := &mcp.Implementation{Name: "asktg-mcp", Version: "0.1.0"}
+	impl := &mcp.Implementation{Name: "asktg-mcp", Version: buildinfo.Version}
 	server := mcp.NewServer(impl, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
