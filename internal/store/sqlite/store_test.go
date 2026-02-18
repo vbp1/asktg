@@ -111,7 +111,7 @@ func TestSearchByEmbedding(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedStoreData(t, store, ctx)
-	if err := store.SetChatPolicy(ctx, 1, true, "lazy", true, "lazy"); err != nil {
+	if err := store.SetChatPolicy(ctx, 1, true, "lazy", true, "lazy", "off"); err != nil {
 		t.Fatalf("set chat policy failed: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestEmbeddingCandidatesBackfillWhenHistoryFull(t *testing.T) {
 	ctx := context.Background()
 	seedStoreData(t, store, ctx)
 
-	if err := store.SetChatPolicy(ctx, 1, true, "full", true, "lazy"); err != nil {
+	if err := store.SetChatPolicy(ctx, 1, true, "full", true, "lazy", "off"); err != nil {
 		t.Fatalf("set chat policy failed: %v", err)
 	}
 
@@ -214,6 +214,41 @@ func TestSearchIncludesPDFFileDocs(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected pdf file-doc result, got: %+v", results)
+	}
+}
+
+func TestChatReactionModeDefaultsOffAndPersists(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.UpsertChat(ctx, domain.ChatPolicy{
+		ChatID:      1,
+		Title:       "chat",
+		Type:        "private",
+		Enabled:     true,
+		HistoryMode: "full",
+		URLsMode:    "off",
+	}); err != nil {
+		t.Fatalf("upsert chat failed: %v", err)
+	}
+
+	chat, err := store.GetChatPolicy(ctx, 1)
+	if err != nil {
+		t.Fatalf("get chat policy failed: %v", err)
+	}
+	if chat.ReactionMode != "off" {
+		t.Fatalf("expected default reaction mode off, got %q", chat.ReactionMode)
+	}
+
+	if err := store.SetChatPolicy(ctx, 1, true, "full", false, "off", "eyes_reaction"); err != nil {
+		t.Fatalf("set chat policy failed: %v", err)
+	}
+	chat, err = store.GetChatPolicy(ctx, 1)
+	if err != nil {
+		t.Fatalf("get chat policy after update failed: %v", err)
+	}
+	if chat.ReactionMode != "eyes_reaction" {
+		t.Fatalf("expected reaction mode eyes_reaction, got %q", chat.ReactionMode)
 	}
 }
 

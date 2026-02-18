@@ -74,6 +74,10 @@ export function PurgeChat(arg1) {
   return window['go']['main']['App']['PurgeChat'](arg1);
 }
 
+export function RealtimeRefreshNow() {
+  return window['go']['main']['App']['RealtimeRefreshNow']();
+}
+
 export function RebuildSemanticIndex() {
   return window['go']['main']['App']['RebuildSemanticIndex']();
 }
@@ -102,8 +106,8 @@ export function SetAutostartEnabled(arg1) {
   return window['go']['main']['App']['SetAutostartEnabled'](arg1);
 }
 
-export function SetChatPolicy(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['SetChatPolicy'](arg1, arg2, arg3, arg4, arg5);
+export function SetChatPolicy(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['SetChatPolicy'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function SetDataDir(arg1) {

@@ -38,6 +38,8 @@ export function PurgeAll():Promise<domain.IndexStatus>;
 
 export function PurgeChat(arg1:number):Promise<domain.IndexStatus>;
 
+export function RealtimeRefreshNow():Promise<string>;
+
 export function RebuildSemanticIndex():Promise<string>;
 
 export function RestoreBackup(arg1:string):Promise<string>;
@@ -52,7 +54,7 @@ export function SemanticStrictness():Promise<string>;
 
 export function SetAutostartEnabled(arg1:boolean):Promise<boolean>;
 
-export function SetChatPolicy(arg1:number,arg2:boolean,arg3:string,arg4:boolean,arg5:string):Promise<void>;
+export function SetChatPolicy(arg1:number,arg2:boolean,arg3:string,arg4:boolean,arg5:string,arg6:string):Promise<void>;
 
 export function SetDataDir(arg1:string):Promise<string>;
 

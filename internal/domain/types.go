@@ -17,6 +17,7 @@ type ChatPolicy struct {
 	HistoryMode     string `json:"history_mode"`
 	AllowEmbeddings bool   `json:"allow_embeddings"`
 	URLsMode        string `json:"urls_mode"`
+	ReactionMode    string `json:"reaction_mode"`
 	SyncCursor      string `json:"sync_cursor"`
 	LastMessageUnix int64  `json:"last_message_unix"`
 	LastSyncedUnix  int64  `json:"last_synced_unix"`
@@ -81,17 +82,25 @@ type Message struct {
 }
 
 type IndexStatus struct {
-	SyncState         string `json:"sync_state"`
-	BackfillProgress  int    `json:"backfill_progress"`
-	QueueDepth        int    `json:"queue_depth"`
-	LastSyncUnix      int64  `json:"last_sync_unix"`
-	MCPEndpoint       string `json:"mcp_endpoint"`
-	MCPEnabled        bool   `json:"mcp_enabled"`
-	MCPStatus         string `json:"mcp_status"`
-	MCPPort           int    `json:"mcp_port"`
-	MessageCount      int    `json:"message_count"`
-	IndexedChunkCount int    `json:"indexed_chunk_count"`
-	UpdatedAtUnix     int64  `json:"updated_at_unix"`
+	SyncState                string `json:"sync_state"`
+	BackfillProgress         int    `json:"backfill_progress"`
+	QueueDepth               int    `json:"queue_depth"`
+	LastSyncUnix             int64  `json:"last_sync_unix"`
+	MCPEndpoint              string `json:"mcp_endpoint"`
+	MCPEnabled               bool   `json:"mcp_enabled"`
+	MCPStatus                string `json:"mcp_status"`
+	MCPPort                  int    `json:"mcp_port"`
+	MessageCount             int    `json:"message_count"`
+	IndexedChunkCount        int    `json:"indexed_chunk_count"`
+	TelegramHistoryRequests  int    `json:"telegram_history_requests"`
+	TelegramFloodWaitEvents  int    `json:"telegram_flood_wait_events"`
+	TelegramFloodWaitSeconds int64  `json:"telegram_flood_wait_seconds"`
+	TelegramBackfillSleeps   int    `json:"telegram_backfill_sleeps"`
+	TelegramBatchCurrent     int    `json:"telegram_batch_current"`
+	RealtimeReconnects       int64  `json:"realtime_reconnects"`
+	RealtimeLastError        string `json:"realtime_last_error,omitempty"`
+	RealtimeLastErrorUnix    int64  `json:"realtime_last_error_unix"`
+	UpdatedAtUnix            int64  `json:"updated_at_unix"`
 }
 
 type TelegramAuthStatus struct {

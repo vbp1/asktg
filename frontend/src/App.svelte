@@ -15,6 +15,7 @@
   let results = [];
   let loading = false;
   let telegramBusy = false;
+  let chatsRefreshBusy = false;
   let syncBusy = false;
   let maintenanceBusy = false;
   let mcpBusy = false;
@@ -103,6 +104,7 @@
           allow_embeddings: base.allow_embeddings,
           history_mode: base.history_mode,
           urls_mode: base.urls_mode,
+          reaction_mode: base.reaction_mode || "off",
           dirty: false,
           saving: false,
         };
@@ -116,6 +118,7 @@
           allow_embeddings: base.allow_embeddings,
           history_mode: base.history_mode,
           urls_mode: base.urls_mode,
+          reaction_mode: base.reaction_mode || "off",
           dirty: false,
           saving: false,
         };
@@ -126,7 +129,8 @@
         prev.enabled !== base.enabled ||
         prev.allow_embeddings !== base.allow_embeddings ||
         prev.history_mode !== base.history_mode ||
-        prev.urls_mode !== base.urls_mode;
+        prev.urls_mode !== base.urls_mode ||
+        (prev.reaction_mode || "off") !== (base.reaction_mode || "off");
       nextEdits[chat.chat_id] = { ...prev, dirty };
     }
 
@@ -151,6 +155,7 @@
         allow_embeddings: base.allow_embeddings,
         history_mode: base.history_mode,
         urls_mode: base.urls_mode,
+        reaction_mode: base.reaction_mode || "off",
         dirty: false,
         saving: false,
       };
@@ -162,7 +167,8 @@
       next.enabled !== base.enabled ||
       next.allow_embeddings !== base.allow_embeddings ||
       next.history_mode !== base.history_mode ||
-      next.urls_mode !== base.urls_mode;
+      next.urls_mode !== base.urls_mode ||
+      (next.reaction_mode || "off") !== (base.reaction_mode || "off");
     chatEdits = { ...chatEdits, [chatId]: next };
   }
 
@@ -176,6 +182,7 @@
         allow_embeddings: base.allow_embeddings,
         history_mode: base.history_mode,
         urls_mode: base.urls_mode,
+        reaction_mode: base.reaction_mode || "off",
         dirty: false,
         saving: false,
       };
@@ -203,7 +210,7 @@
         }
         chatEdits = { ...chatEdits, [key]: { ...edit, saving: true } };
 
-        await backend().SetChatPolicy(chatId, edit.enabled, edit.history_mode, edit.allow_embeddings, edit.urls_mode);
+        await backend().SetChatPolicy(chatId, edit.enabled, edit.history_mode, edit.allow_embeddings, edit.urls_mode, edit.reaction_mode || "off");
 
         const after = chatEdits[key];
         if (after) {
@@ -715,6 +722,20 @@
       telegramBusy = false;
     }
     return ok;
+  }
+
+  async function refreshRealtimeFromChats() {
+    chatsRefreshBusy = true;
+    errorText = "";
+    infoText = "";
+    try {
+      await backend().RealtimeRefreshNow();
+      infoText = "Realtime chat refresh requested";
+    } catch (error) {
+      errorText = String(error);
+    } finally {
+      chatsRefreshBusy = false;
+    }
   }
 
   async function runSearch() {
@@ -1543,6 +1564,9 @@
           <button class="small" on:click={discardAllChatEdits} disabled={dirtyCount === 0 || applyAllBusy}>
             Discard
           </button>
+          <button class="small" on:click={refreshRealtimeFromChats} disabled={chatsRefreshBusy || applyAllBusy || telegramBusy}>
+            {chatsRefreshBusy ? "Refreshing..." : "Refresh realtime"}
+          </button>
           <button class="small primary" on:click={applyAllChatPolicies} disabled={dirtyCount === 0 || applyAllBusy}>
             {applyAllBusy ? `Applying ${applyAllDone}/${applyAllTotal}...` : "Apply changes"}
           </button>
@@ -1685,6 +1709,49 @@
                     on:change={() => setChatEdit(chat.chat_id, { urls_mode: "full" })}
                   />
                   High
+                </label>
+              </div>
+            </div>
+
+            <div class="enumField">
+              <div class="enumMeta">
+                <div class="labelRow">
+                  <span class="fieldLabel">Mark</span>
+                  <span
+                    class="helpIcon"
+                    title="Optional visual mark after indexing: adds reaction only to your outgoing messages."
+                    >?</span
+                  >
+                </div>
+              </div>
+              <div class="pills">
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.reaction_mode ?? chat.reaction_mode ?? "off") === "off"}
+                  title="Off: do not add any marker."
+                >
+                  <input
+                    type="radio"
+                    name={`react-${chat.chat_id}`}
+                    value="off"
+                    checked={(chatEdits[chat.chat_id]?.reaction_mode ?? chat.reaction_mode ?? "off") === "off"}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { reaction_mode: "off" })}
+                  />
+                  Off
+                </label>
+                <label
+                  class:active={(chatEdits[chat.chat_id]?.reaction_mode ?? chat.reaction_mode ?? "off") === "eyes_reaction"}
+                  title="Eyes: add 👀 reaction to your outgoing messages after indexing."
+                >
+                  <input
+                    type="radio"
+                    name={`react-${chat.chat_id}`}
+                    value="eyes_reaction"
+                    checked={(chatEdits[chat.chat_id]?.reaction_mode ?? chat.reaction_mode ?? "off") === "eyes_reaction"}
+                    disabled={applyAllBusy || chatEdits[chat.chat_id]?.saving}
+                    on:change={() => setChatEdit(chat.chat_id, { reaction_mode: "eyes_reaction" })}
+                  />
+                  👀
                 </label>
               </div>
             </div>

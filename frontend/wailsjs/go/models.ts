@@ -30,6 +30,7 @@ export namespace domain {
 	    history_mode: string;
 	    allow_embeddings: boolean;
 	    urls_mode: string;
+	    reaction_mode: string;
 	    sync_cursor: string;
 	    last_message_unix: number;
 	    last_synced_unix: number;
@@ -47,6 +48,7 @@ export namespace domain {
 	        this.history_mode = source["history_mode"];
 	        this.allow_embeddings = source["allow_embeddings"];
 	        this.urls_mode = source["urls_mode"];
+	        this.reaction_mode = source["reaction_mode"];
 	        this.sync_cursor = source["sync_cursor"];
 	        this.last_message_unix = source["last_message_unix"];
 	        this.last_synced_unix = source["last_synced_unix"];
@@ -125,6 +127,14 @@ export namespace domain {
 	    mcp_port: number;
 	    message_count: number;
 	    indexed_chunk_count: number;
+	    telegram_history_requests: number;
+	    telegram_flood_wait_events: number;
+	    telegram_flood_wait_seconds: number;
+	    telegram_backfill_sleeps: number;
+	    telegram_batch_current: number;
+	    realtime_reconnects: number;
+	    realtime_last_error?: string;
+	    realtime_last_error_unix: number;
 	    updated_at_unix: number;
 	
 	    static createFrom(source: any = {}) {
@@ -143,6 +153,14 @@ export namespace domain {
 	        this.mcp_port = source["mcp_port"];
 	        this.message_count = source["message_count"];
 	        this.indexed_chunk_count = source["indexed_chunk_count"];
+	        this.telegram_history_requests = source["telegram_history_requests"];
+	        this.telegram_flood_wait_events = source["telegram_flood_wait_events"];
+	        this.telegram_flood_wait_seconds = source["telegram_flood_wait_seconds"];
+	        this.telegram_backfill_sleeps = source["telegram_backfill_sleeps"];
+	        this.telegram_batch_current = source["telegram_batch_current"];
+	        this.realtime_reconnects = source["realtime_reconnects"];
+	        this.realtime_last_error = source["realtime_last_error"];
+	        this.realtime_last_error_unix = source["realtime_last_error_unix"];
 	        this.updated_at_unix = source["updated_at_unix"];
 	    }
 	}

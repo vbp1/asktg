@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTrackReadMaxMessageID(t *testing.T) {
 	got := map[int64]int64{}
@@ -16,5 +19,59 @@ func TestTrackReadMaxMessageID(t *testing.T) {
 	}
 	if got[101] != 9 {
 		t.Fatalf("expected max message id 9, got %d", got[101])
+	}
+}
+
+func TestSameInt64Set(t *testing.T) {
+	if !sameInt64Set([]int64{1, 2, 3}, []int64{3, 2, 1}) {
+		t.Fatal("expected sets to be equal")
+	}
+	if sameInt64Set([]int64{1, 2}, []int64{1, 2, 3}) {
+		t.Fatal("expected sets with different size to differ")
+	}
+	if sameInt64Set([]int64{1, 2, 3}, []int64{1, 2, 4}) {
+		t.Fatal("expected sets with different elements to differ")
+	}
+}
+
+func TestGrowRealtimeBackoff(t *testing.T) {
+	if got := growRealtimeBackoff(0); got != realtimeReconnectBase {
+		t.Fatalf("expected base backoff %v, got %v", realtimeReconnectBase, got)
+	}
+	if got := growRealtimeBackoff(realtimeReconnectMax); got != realtimeReconnectMax {
+		t.Fatalf("expected capped backoff %v, got %v", realtimeReconnectMax, got)
+	}
+	if got := growRealtimeBackoff(2 * time.Second); got != 4*time.Second {
+		t.Fatalf("expected doubled backoff 4s, got %v", got)
+	}
+}
+
+func TestRequestRealtimeChatRefreshCoalesces(t *testing.T) {
+	app := &App{realtimeRefreshCh: make(chan struct{}, 1)}
+	app.requestRealtimeChatRefresh()
+	app.requestRealtimeChatRefresh()
+
+	select {
+	case <-app.realtimeRefreshSignal():
+	default:
+		t.Fatal("expected a queued refresh signal")
+	}
+
+	select {
+	case <-app.realtimeRefreshSignal():
+		t.Fatal("expected at most one queued refresh signal")
+	default:
+	}
+}
+
+func TestNormalizeReactionMode(t *testing.T) {
+	if got := normalizeReactionMode("eyes_reaction"); got != reactionModeEyes {
+		t.Fatalf("expected %q, got %q", reactionModeEyes, got)
+	}
+	if got := normalizeReactionMode(" EYES_REACTION "); got != reactionModeEyes {
+		t.Fatalf("expected normalized eyes mode, got %q", got)
+	}
+	if got := normalizeReactionMode("invalid"); got != reactionModeOff {
+		t.Fatalf("expected fallback off mode, got %q", got)
 	}
 }

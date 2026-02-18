@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS chats (
 	allow_embeddings INTEGER NOT NULL DEFAULT 0,
 	embeddings_since_unix INTEGER NOT NULL DEFAULT 0,
 	urls_mode TEXT NOT NULL DEFAULT 'off',
+	reaction_mode TEXT NOT NULL DEFAULT 'off',
 	sync_cursor TEXT NOT NULL DEFAULT '',
 	last_message_unix INTEGER NOT NULL DEFAULT 0,
 	last_synced_unix INTEGER NOT NULL DEFAULT 0
@@ -285,6 +286,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_state_next ON tasks(type, state, next_run_a
 	if err := s.ensureChatsEmbeddingsSinceColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureChatsReactionModeColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureURLDocsContentTypeColumn(ctx); err != nil {
 		return err
 	}
@@ -315,6 +319,21 @@ func (s *Store) ensureURLDocsContentTypeColumn(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureChatsReactionModeColumn(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE chats ADD COLUMN reaction_mode TEXT NOT NULL DEFAULT 'off'`); err != nil {
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "duplicate column name") {
+			return err
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE chats
+SET reaction_mode = 'off'
+WHERE TRIM(COALESCE(reaction_mode, '')) = ''
+`)
+	return err
 }
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
@@ -433,9 +452,13 @@ func (s *Store) GetSettingBool(ctx context.Context, key string, defaultValue boo
 }
 
 func (s *Store) UpsertChat(ctx context.Context, chat domain.ChatPolicy) error {
+	reactionMode := strings.ToLower(strings.TrimSpace(chat.ReactionMode))
+	if reactionMode == "" {
+		reactionMode = "off"
+	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO chats(chat_id, title, type, enabled, history_mode, allow_embeddings, embeddings_since_unix, urls_mode, sync_cursor, last_message_unix, last_synced_unix)
-VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+INSERT INTO chats(chat_id, title, type, enabled, history_mode, allow_embeddings, embeddings_since_unix, urls_mode, reaction_mode, sync_cursor, last_message_unix, last_synced_unix)
+VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id) DO UPDATE SET
 	title = excluded.title,
 	type = excluded.type,
@@ -443,17 +466,18 @@ ON CONFLICT(chat_id) DO UPDATE SET
 	history_mode = excluded.history_mode,
 	allow_embeddings = excluded.allow_embeddings,
 	urls_mode = excluded.urls_mode,
+	reaction_mode = excluded.reaction_mode,
 	sync_cursor = excluded.sync_cursor,
 	last_message_unix = excluded.last_message_unix,
 	last_synced_unix = excluded.last_synced_unix
-`, chat.ChatID, chat.Title, chat.Type, boolToInt(chat.Enabled), chat.HistoryMode, boolToInt(chat.AllowEmbeddings), chat.URLsMode, chat.SyncCursor, chat.LastMessageUnix, chat.LastSyncedUnix)
+`, chat.ChatID, chat.Title, chat.Type, boolToInt(chat.Enabled), chat.HistoryMode, boolToInt(chat.AllowEmbeddings), chat.URLsMode, reactionMode, chat.SyncCursor, chat.LastMessageUnix, chat.LastSyncedUnix)
 	return err
 }
 
 func (s *Store) UpsertDiscoveredChat(ctx context.Context, chatID int64, title, chatType string) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO chats(chat_id, title, type, enabled, history_mode, allow_embeddings, embeddings_since_unix, urls_mode, sync_cursor, last_message_unix, last_synced_unix)
-VALUES(?, ?, ?, 0, 'full', 0, 0, 'off', '', 0, 0)
+INSERT INTO chats(chat_id, title, type, enabled, history_mode, allow_embeddings, embeddings_since_unix, urls_mode, reaction_mode, sync_cursor, last_message_unix, last_synced_unix)
+VALUES(?, ?, ?, 0, 'full', 0, 0, 'off', 'off', '', 0, 0)
 ON CONFLICT(chat_id) DO UPDATE SET
 	title = excluded.title,
 	type = excluded.type
@@ -470,7 +494,11 @@ WHERE chat_id = ?
 	return err
 }
 
-func (s *Store) SetChatPolicy(ctx context.Context, chatID int64, enabled bool, historyMode string, allowEmbeddings bool, urlsMode string) error {
+func (s *Store) SetChatPolicy(ctx context.Context, chatID int64, enabled bool, historyMode string, allowEmbeddings bool, urlsMode string, reactionMode string) error {
+	reactionMode = strings.ToLower(strings.TrimSpace(reactionMode))
+	if reactionMode == "" {
+		reactionMode = "off"
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -506,9 +534,9 @@ WHERE chat_id = ?
 
 	_, err = tx.ExecContext(ctx, `
 UPDATE chats
-SET enabled = ?, history_mode = ?, allow_embeddings = ?, embeddings_since_unix = ?, urls_mode = ?
+SET enabled = ?, history_mode = ?, allow_embeddings = ?, embeddings_since_unix = ?, urls_mode = ?, reaction_mode = ?
 WHERE chat_id = ?
-`, boolToInt(enabled), historyMode, boolToInt(allowEmbeddings), sinceUnix, urlsMode, chatID)
+`, boolToInt(enabled), historyMode, boolToInt(allowEmbeddings), sinceUnix, urlsMode, reactionMode, chatID)
 	if err != nil {
 		return err
 	}
@@ -526,10 +554,10 @@ func (s *Store) GetChatPolicy(ctx context.Context, chatID int64) (domain.ChatPol
 		allowEmbeddings int
 	)
 	err := s.db.QueryRowContext(ctx, `
-SELECT chat_id, title, type, enabled, history_mode, allow_embeddings, urls_mode, sync_cursor, last_message_unix, last_synced_unix
+SELECT chat_id, title, type, enabled, history_mode, allow_embeddings, urls_mode, reaction_mode, sync_cursor, last_message_unix, last_synced_unix
 FROM chats
 WHERE chat_id = ?
-`, chatID).Scan(&chat.ChatID, &chat.Title, &chat.Type, &enabled, &chat.HistoryMode, &allowEmbeddings, &chat.URLsMode, &chat.SyncCursor, &chat.LastMessageUnix, &chat.LastSyncedUnix)
+`, chatID).Scan(&chat.ChatID, &chat.Title, &chat.Type, &enabled, &chat.HistoryMode, &allowEmbeddings, &chat.URLsMode, &chat.ReactionMode, &chat.SyncCursor, &chat.LastMessageUnix, &chat.LastSyncedUnix)
 	if err != nil {
 		return domain.ChatPolicy{}, err
 	}
@@ -540,7 +568,7 @@ WHERE chat_id = ?
 
 func (s *Store) ListChats(ctx context.Context) ([]domain.ChatPolicy, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT chat_id, title, type, enabled, history_mode, allow_embeddings, urls_mode, sync_cursor, last_message_unix, last_synced_unix
+SELECT chat_id, title, type, enabled, history_mode, allow_embeddings, urls_mode, reaction_mode, sync_cursor, last_message_unix, last_synced_unix
 FROM chats
 ORDER BY title ASC
 `)
@@ -556,7 +584,7 @@ ORDER BY title ASC
 			enabled         int
 			allowEmbeddings int
 		)
-		if err := rows.Scan(&chat.ChatID, &chat.Title, &chat.Type, &enabled, &chat.HistoryMode, &allowEmbeddings, &chat.URLsMode, &chat.SyncCursor, &chat.LastMessageUnix, &chat.LastSyncedUnix); err != nil {
+		if err := rows.Scan(&chat.ChatID, &chat.Title, &chat.Type, &enabled, &chat.HistoryMode, &allowEmbeddings, &chat.URLsMode, &chat.ReactionMode, &chat.SyncCursor, &chat.LastMessageUnix, &chat.LastSyncedUnix); err != nil {
 			return nil, err
 		}
 		chat.Enabled = enabled == 1

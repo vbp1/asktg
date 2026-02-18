@@ -21,10 +21,18 @@ import (
 	"github.com/gotd/td/telegram/query/dialogs"
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 const channelChatIDOffset int64 = 1_000_000_000_000
 const historyBatchSize = 100
+const minHistoryBatchSize = 20
+const historyBatchStep = 10
+const historySuccessBumpThreshold = 6
+const backfillGlobalMinInterval = 333 * time.Millisecond
+const backfillPerChatMinInterval = 1400 * time.Millisecond
+const floodCacheGrace = 1 * time.Second
+const maxFloodCacheWait = 15 * time.Minute
 
 var (
 	ErrNotConfigured  = errors.New("telegram api credentials are not configured")
@@ -63,6 +71,13 @@ type SyncedMessage struct {
 	SenderDisplay string
 	Text          string
 	HasURL        bool
+	IsOutgoing    bool
+}
+
+type MessageReaction struct {
+	ChatID int64
+	MsgID  int64
+	Emoji  string
 }
 
 type SyncedFile struct {
@@ -92,6 +107,21 @@ type SyncReport struct {
 	Chats        []ChatSyncResult
 	Messages     []SyncedMessage
 	Files        []SyncedFile
+	Metrics      SyncMetrics
+}
+
+type SyncMetrics struct {
+	HistoryRequests   int   `json:"history_requests"`
+	FloodWaitEvents   int   `json:"flood_wait_events"`
+	FloodWaitSeconds  int64 `json:"flood_wait_seconds"`
+	BackfillSleeps    int   `json:"backfill_sleeps"`
+	BackfillSleepMS   int64 `json:"backfill_sleep_ms"`
+	FloodSkippedChats int   `json:"flood_skipped_chats"`
+	BatchMin          int   `json:"batch_min"`
+	BatchMax          int   `json:"batch_max"`
+	BatchCurrent      int   `json:"batch_current"`
+	StartedAtUnix     int64 `json:"started_at_unix"`
+	CompletedAtUnix   int64 `json:"completed_at_unix"`
 }
 
 type LiveEventKind string
@@ -114,15 +144,25 @@ type Service struct {
 
 	mu           sync.RWMutex
 	runMu        sync.Mutex
+	throttleMu   sync.Mutex
 	apiID        int
 	apiHash      string
 	pendingPhone string
 	pendingHash  string
+
+	backfillLastGlobalReqAt time.Time
+	backfillLastReqByChat   map[int64]time.Time
+	floodUntilByChat        map[int64]time.Time
+	adaptiveBatchSize       int
+	adaptiveSuccessStreak   int
 }
 
 func NewService(sessionPath string) *Service {
 	return &Service{
-		sessionPath: sessionPath,
+		sessionPath:           sessionPath,
+		backfillLastReqByChat: map[int64]time.Time{},
+		floodUntilByChat:      map[int64]time.Time{},
+		adaptiveBatchSize:     historyBatchSize,
 	}
 }
 
@@ -284,13 +324,19 @@ func (s *Service) ListDialogs(ctx context.Context) ([]Dialog, error) {
 }
 
 func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerChat int) (SyncReport, error) {
+	startedAt := time.Now().Unix()
 	report := SyncReport{
-		SyncedAtUnix: time.Now().Unix(),
+		SyncedAtUnix: startedAt,
 		Chats:        make([]ChatSyncResult, 0, len(chats)),
 		Messages:     make([]SyncedMessage, 0, len(chats)*historyBatchSize),
 		Files:        make([]SyncedFile, 0, len(chats)),
+		Metrics: SyncMetrics{
+			StartedAtUnix: startedAt,
+			BatchCurrent:  s.currentAdaptiveBatchSize(),
+		},
 	}
 	if len(chats) == 0 {
+		report.Metrics.CompletedAtUnix = time.Now().Unix()
 		return report, nil
 	}
 
@@ -302,6 +348,7 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 	if err != nil {
 		return report, err
 	}
+	runMetrics := &syncRunMetrics{}
 
 	err = s.withClient(ctx, apiID, apiHash, func(runCtx context.Context, client *tdtelegram.Client) error {
 		authStatus, statusErr := client.Auth().Status(runCtx)
@@ -330,7 +377,7 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 				continue
 			}
 
-			result, syncedMessages, syncedFiles, syncErr := syncSingleChat(runCtx, client.API(), resolved, state, maxPerChat)
+			result, syncedMessages, syncedFiles, syncErr := s.syncSingleChat(runCtx, client.API(), resolved, state, maxPerChat, runMetrics)
 			if syncErr != nil {
 				return syncErr
 			}
@@ -345,6 +392,7 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 		return report, err
 	}
 	report.SyncedAtUnix = time.Now().Unix()
+	report.Metrics = runMetrics.toPublic(s.currentAdaptiveBatchSize(), startedAt, report.SyncedAtUnix)
 	return report, nil
 }
 
@@ -387,6 +435,60 @@ func (s *Service) MarkChatsRead(ctx context.Context, chatMaxMsgID map[int64]int6
 
 			if err := markPeerRead(runCtx, client.API(), resolved.peer, int(maxMsgID)); err != nil {
 				joinedErr = errors.Join(joinedErr, fmt.Errorf("chat %d: %w", chatID, err))
+			}
+		}
+		return joinedErr
+	})
+}
+
+func (s *Service) ReactToMessages(ctx context.Context, reactions []MessageReaction) error {
+	if len(reactions) == 0 {
+		return nil
+	}
+
+	apiID, apiHash, err := s.credentials()
+	if err != nil {
+		return err
+	}
+
+	uniq := make(map[string]MessageReaction, len(reactions))
+	for _, item := range reactions {
+		emoji := strings.TrimSpace(item.Emoji)
+		if item.ChatID == 0 || item.MsgID <= 0 || emoji == "" {
+			continue
+		}
+		key := strconv.FormatInt(item.ChatID, 10) + ":" + strconv.FormatInt(item.MsgID, 10) + ":" + emoji
+		uniq[key] = item
+	}
+	if len(uniq) == 0 {
+		return nil
+	}
+
+	return s.withClient(ctx, apiID, apiHash, func(runCtx context.Context, client *tdtelegram.Client) error {
+		authStatus, statusErr := client.Auth().Status(runCtx)
+		if statusErr != nil {
+			return statusErr
+		}
+		if !authStatus.Authorized {
+			return ErrUnauthorized
+		}
+
+		dialogLookup, collectErr := collectDialogLookup(runCtx, client)
+		if collectErr != nil {
+			return collectErr
+		}
+
+		var joinedErr error
+		for _, item := range uniq {
+			resolved, ok := dialogLookup[item.ChatID]
+			if !ok {
+				continue
+			}
+			if err := sendEmojiReaction(runCtx, client.API(), resolved.peer, int(item.MsgID), item.Emoji); err != nil {
+				if isReactionUnavailable(err) {
+					continue
+				}
+				joinedErr = errors.Join(joinedErr, fmt.Errorf("chat %d msg %d: %w", item.ChatID, item.MsgID, err))
 			}
 		}
 		return joinedErr
@@ -546,7 +648,212 @@ func collectDialogLookup(ctx context.Context, client *tdtelegram.Client) (map[in
 	return lookup, nil
 }
 
-func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, state SyncChatState, maxPerChat int) (ChatSyncResult, []SyncedMessage, []SyncedFile, error) {
+type syncRunMetrics struct {
+	historyRequests   int
+	floodWaitEvents   int
+	floodWaitSeconds  int64
+	backfillSleeps    int
+	backfillSleepMS   int64
+	floodSkippedChats int
+	batchMin          int
+	batchMax          int
+}
+
+func (m *syncRunMetrics) recordRequest(limit int) {
+	if m == nil || limit <= 0 {
+		return
+	}
+	m.historyRequests++
+	if m.batchMin == 0 || limit < m.batchMin {
+		m.batchMin = limit
+	}
+	if limit > m.batchMax {
+		m.batchMax = limit
+	}
+}
+
+func (m *syncRunMetrics) recordFloodWait(wait time.Duration) {
+	if m == nil {
+		return
+	}
+	m.floodWaitEvents++
+	seconds := int64(wait / time.Second)
+	if wait%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	m.floodWaitSeconds += seconds
+}
+
+func (m *syncRunMetrics) recordFloodSkip() {
+	if m == nil {
+		return
+	}
+	m.floodSkippedChats++
+}
+
+func (m *syncRunMetrics) recordBackfillSleep(d time.Duration) {
+	if m == nil || d <= 0 {
+		return
+	}
+	m.backfillSleeps++
+	m.backfillSleepMS += d.Milliseconds()
+}
+
+func (m *syncRunMetrics) toPublic(currentBatch int, startedAtUnix int64, completedAtUnix int64) SyncMetrics {
+	if currentBatch <= 0 {
+		currentBatch = historyBatchSize
+	}
+	out := SyncMetrics{
+		HistoryRequests:   m.historyRequests,
+		FloodWaitEvents:   m.floodWaitEvents,
+		FloodWaitSeconds:  m.floodWaitSeconds,
+		BackfillSleeps:    m.backfillSleeps,
+		BackfillSleepMS:   m.backfillSleepMS,
+		FloodSkippedChats: m.floodSkippedChats,
+		BatchCurrent:      currentBatch,
+		StartedAtUnix:     startedAtUnix,
+		CompletedAtUnix:   completedAtUnix,
+	}
+	if m.batchMin > 0 {
+		out.BatchMin = m.batchMin
+	} else {
+		out.BatchMin = currentBatch
+	}
+	if m.batchMax > 0 {
+		out.BatchMax = m.batchMax
+	} else {
+		out.BatchMax = currentBatch
+	}
+	return out
+}
+
+func (s *Service) currentAdaptiveBatchSize() int {
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	return s.currentAdaptiveBatchSizeLocked()
+}
+
+func (s *Service) currentAdaptiveBatchSizeLocked() int {
+	if s.adaptiveBatchSize <= 0 || s.adaptiveBatchSize > historyBatchSize {
+		s.adaptiveBatchSize = historyBatchSize
+	}
+	if s.adaptiveBatchSize < minHistoryBatchSize {
+		s.adaptiveBatchSize = minHistoryBatchSize
+	}
+	return s.adaptiveBatchSize
+}
+
+func (s *Service) noteAdaptiveBatchSuccess() {
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	current := s.currentAdaptiveBatchSizeLocked()
+	if current >= historyBatchSize {
+		s.adaptiveBatchSize = historyBatchSize
+		s.adaptiveSuccessStreak = 0
+		return
+	}
+	s.adaptiveSuccessStreak++
+	if s.adaptiveSuccessStreak < historySuccessBumpThreshold {
+		return
+	}
+	next := current + historyBatchStep
+	if next > historyBatchSize {
+		next = historyBatchSize
+	}
+	s.adaptiveBatchSize = next
+	s.adaptiveSuccessStreak = 0
+}
+
+func (s *Service) noteAdaptiveBatchFlood(chatID int64, wait time.Duration) time.Time {
+	if wait <= 0 {
+		wait = 3 * time.Second
+	}
+	if wait > maxFloodCacheWait {
+		wait = maxFloodCacheWait
+	}
+	until := time.Now().Add(wait + floodCacheGrace)
+
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	if s.floodUntilByChat == nil {
+		s.floodUntilByChat = make(map[int64]time.Time, 64)
+	}
+	if existing, ok := s.floodUntilByChat[chatID]; ok && existing.After(until) {
+		until = existing
+	} else {
+		s.floodUntilByChat[chatID] = until
+	}
+
+	current := s.currentAdaptiveBatchSizeLocked()
+	next := current / 2
+	if next < minHistoryBatchSize {
+		next = minHistoryBatchSize
+	}
+	s.adaptiveBatchSize = next
+	s.adaptiveSuccessStreak = 0
+	return until
+}
+
+func (s *Service) backfillFloodBlocked(chatID int64) bool {
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	if s.floodUntilByChat == nil {
+		return false
+	}
+	until, ok := s.floodUntilByChat[chatID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(s.floodUntilByChat, chatID)
+		return false
+	}
+	return true
+}
+
+func (s *Service) waitBackfillLimiter(ctx context.Context, chatID int64, metrics *syncRunMetrics) error {
+	for {
+		wait := time.Duration(0)
+		now := time.Now()
+
+		s.throttleMu.Lock()
+		if s.backfillLastReqByChat == nil {
+			s.backfillLastReqByChat = make(map[int64]time.Time, 64)
+		}
+		if since := now.Sub(s.backfillLastGlobalReqAt); since < backfillGlobalMinInterval {
+			wait = backfillGlobalMinInterval - since
+		}
+		if last, ok := s.backfillLastReqByChat[chatID]; ok {
+			if since := now.Sub(last); since < backfillPerChatMinInterval {
+				perChatWait := backfillPerChatMinInterval - since
+				if perChatWait > wait {
+					wait = perChatWait
+				}
+			}
+		}
+		if wait <= 0 {
+			s.backfillLastGlobalReqAt = now
+			s.backfillLastReqByChat[chatID] = now
+			s.throttleMu.Unlock()
+			return nil
+		}
+		s.throttleMu.Unlock()
+
+		metrics.recordBackfillSleep(wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Service) syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, state SyncChatState, maxPerChat int, metrics *syncRunMetrics) (ChatSyncResult, []SyncedMessage, []SyncedFile, error) {
 	lastSyncedUnix := time.Now().Unix()
 	result := ChatSyncResult{
 		ChatID:          state.ChatID,
@@ -563,22 +870,34 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 	lastKnown := state.LastMessageUnix
 	tailMinID := 0
 	hitKnown := false
+	chatID := dialog.dialog.ChatID
 
 	offsetID := 0
 	for remaining > 0 {
+		requestLimit := minInt(s.currentAdaptiveBatchSize(), remaining)
+		if requestLimit <= 0 {
+			break
+		}
+		metrics.recordRequest(requestLimit)
 		page, pageErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:       dialog.peer,
 			OffsetID:   offsetID,
 			OffsetDate: 0,
 			AddOffset:  0,
-			Limit:      minInt(historyBatchSize, remaining),
+			Limit:      requestLimit,
 			MaxID:      0,
 			MinID:      0,
 			Hash:       0,
 		})
 		if pageErr != nil {
+			if wait, ok := tgerr.AsFloodWait(pageErr); ok {
+				s.noteAdaptiveBatchFlood(chatID, wait)
+				metrics.recordFloodWait(wait)
+				return result, messages, files, nil
+			}
 			return result, nil, nil, pageErr
 		}
+		s.noteAdaptiveBatchSuccess()
 		modified, ok := page.AsModified()
 		if !ok {
 			break
@@ -622,7 +941,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 			break
 		}
 		tailMinID = pageMinID
-		if hitKnown || len(pageMessages) < historyBatchSize {
+		if hitKnown || len(pageMessages) < requestLimit {
 			break
 		}
 		if offsetID == pageMinID {
@@ -643,20 +962,45 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 	}
 
 	result.BackfillDone = false
+	if s.backfillFloodBlocked(chatID) {
+		result.NextCursor = strconv.Itoa(backfillOffset)
+		metrics.recordFloodSkip()
+		return result, messages, files, nil
+	}
 	for remaining > 0 {
+		if s.backfillFloodBlocked(chatID) {
+			result.NextCursor = strconv.Itoa(backfillOffset)
+			metrics.recordFloodSkip()
+			return result, messages, files, nil
+		}
+		if err := s.waitBackfillLimiter(ctx, chatID, metrics); err != nil {
+			return result, nil, nil, err
+		}
+		requestLimit := minInt(s.currentAdaptiveBatchSize(), remaining)
+		if requestLimit <= 0 {
+			break
+		}
+		metrics.recordRequest(requestLimit)
 		page, pageErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:       dialog.peer,
 			OffsetID:   backfillOffset,
 			OffsetDate: 0,
 			AddOffset:  0,
-			Limit:      minInt(historyBatchSize, remaining),
+			Limit:      requestLimit,
 			MaxID:      0,
 			MinID:      0,
 			Hash:       0,
 		})
 		if pageErr != nil {
+			if wait, ok := tgerr.AsFloodWait(pageErr); ok {
+				s.noteAdaptiveBatchFlood(chatID, wait)
+				metrics.recordFloodWait(wait)
+				result.NextCursor = strconv.Itoa(backfillOffset)
+				return result, messages, files, nil
+			}
 			return result, nil, nil, pageErr
 		}
+		s.noteAdaptiveBatchSuccess()
 		modified, ok := page.AsModified()
 		if !ok {
 			result.NextCursor = ""
@@ -702,7 +1046,7 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 			return result, messages, files, nil
 		}
 
-		if len(pageMessages) < historyBatchSize {
+		if len(pageMessages) < requestLimit {
 			result.NextCursor = ""
 			result.BackfillDone = true
 			return result, messages, files, nil
@@ -740,6 +1084,41 @@ func markPeerRead(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, m
 		})
 		return err
 	}
+}
+
+func sendEmojiReaction(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, msgID int, emoji string) error {
+	if api == nil || peer == nil || msgID <= 0 || strings.TrimSpace(emoji) == "" {
+		return nil
+	}
+	_, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+		Peer:  peer,
+		MsgID: msgID,
+		Reaction: []tg.ReactionClass{
+			&tg.ReactionEmoji{Emoticon: emoji},
+		},
+	})
+	return err
+}
+
+func isReactionUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if wait, ok := tgerr.AsFloodWait(err); ok && wait > 0 {
+		return true
+	}
+	if rpcErr, ok := tgerr.As(err); ok {
+		return rpcErr.IsOneOf(
+			"REACTION_INVALID",
+			"REACTIONS_TOO_MANY",
+			"CHAT_REACTIONS_UNAVAILABLE",
+			"CHAT_SEND_REACTIONS_FORBIDDEN",
+			"REACTION_EMPTY",
+			"MESSAGE_ID_INVALID",
+			"TOPIC_DELETED",
+		)
+	}
+	return false
 }
 
 type entityLookup struct {
@@ -786,6 +1165,7 @@ func toSyncedMessage(chatID int64, msg *tg.Message, entities entityLookup) Synce
 		SenderDisplay: sender,
 		Text:          msg.Message,
 		HasURL:        containsURL(msg.Message),
+		IsOutgoing:    msg.Out,
 	}
 }
 

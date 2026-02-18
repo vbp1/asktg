@@ -41,21 +41,27 @@ import (
 )
 
 const (
-	syncInterval          = 90 * time.Second
-	syncMaxMessagesPerRun = 400
-	realtimeBurst         = 75 * time.Second
-	urlCandidateScanLimit = 40
-	urlTaskMaxAttempts    = 3
-	pdfTaskMaxAttempts    = 3
-	embedTaskMaxAttempts  = 4
-	embedCandidateLimit   = 60
-	backupFilenamePrefix  = "asktg-backup-"
-	hnswM                 = 16
-	hnswEfConstruction    = 200
-	hnswEfSearch          = 64
-	windowStateNormal     = "normal"
-	windowStateMaximised  = "maximised"
-	windowStateFullscreen = "fullscreen"
+	syncInterval                = 90 * time.Second
+	syncMaxMessagesPerRun       = 400
+	realtimeChatRefreshInterval = 5 * time.Minute
+	realtimeReadAckInterval     = 2 * time.Second
+	realtimeReconnectBase       = 1 * time.Second
+	realtimeReconnectMax        = 30 * time.Second
+	urlCandidateScanLimit       = 40
+	urlTaskMaxAttempts          = 3
+	pdfTaskMaxAttempts          = 3
+	embedTaskMaxAttempts        = 4
+	embedCandidateLimit         = 60
+	backupFilenamePrefix        = "asktg-backup-"
+	hnswM                       = 16
+	hnswEfConstruction          = 200
+	hnswEfSearch                = 64
+	windowStateNormal           = "normal"
+	windowStateMaximised        = "maximised"
+	windowStateFullscreen       = "fullscreen"
+	reactionModeOff             = "off"
+	reactionModeEyes            = "eyes_reaction"
+	eyesReactionEmoji           = "👀"
 )
 
 type semanticProfile struct {
@@ -99,16 +105,21 @@ type App struct {
 	paused      bool
 	quitNow     bool
 
-	syncCancel           context.CancelFunc
-	syncWG               sync.WaitGroup
-	syncRunMu            sync.Mutex
-	syncState            string
-	syncBackfillProgress int
-	syncLastUnix         int64
-	realtimeWG           sync.WaitGroup
-	urlWG                sync.WaitGroup
-	embedWG              sync.WaitGroup
-	pdfWG                sync.WaitGroup
+	syncCancel            context.CancelFunc
+	syncWG                sync.WaitGroup
+	syncRunMu             sync.Mutex
+	syncState             string
+	syncBackfillProgress  int
+	syncLastUnix          int64
+	tgSyncMetrics         telegram.SyncMetrics
+	realtimeReconnects    int64
+	realtimeLastError     string
+	realtimeLastErrorUnix int64
+	realtimeRefreshCh     chan struct{}
+	realtimeWG            sync.WaitGroup
+	urlWG                 sync.WaitGroup
+	embedWG               sync.WaitGroup
+	pdfWG                 sync.WaitGroup
 
 	pdfBackfillMu      sync.Mutex
 	pdfBackfillRunning bool
@@ -117,7 +128,8 @@ type App struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		trayStatus: "initializing",
+		trayStatus:        "initializing",
+		realtimeRefreshCh: make(chan struct{}, 1),
 	}
 }
 
@@ -740,7 +752,7 @@ func (a *App) ListChats() ([]domain.ChatPolicy, error) {
 	return a.store.ListChats(a.ctx)
 }
 
-func (a *App) SetChatPolicy(chatID int64, enabled bool, historyMode string, allowEmbeddings bool, urlsMode string) error {
+func (a *App) SetChatPolicy(chatID int64, enabled bool, historyMode string, allowEmbeddings bool, urlsMode string, reactionMode string) error {
 	if a.store == nil {
 		return errors.New("store is not initialized")
 	}
@@ -752,9 +764,11 @@ func (a *App) SetChatPolicy(chatID int64, enabled bool, historyMode string, allo
 	if urlsMode == "" {
 		urlsMode = "off"
 	}
-	if err := a.store.SetChatPolicy(a.ctx, chatID, enabled, historyMode, allowEmbeddings, urlsMode); err != nil {
+	reactionMode = normalizeReactionMode(reactionMode)
+	if err := a.store.SetChatPolicy(a.ctx, chatID, enabled, historyMode, allowEmbeddings, urlsMode, reactionMode); err != nil {
 		return err
 	}
+	a.requestRealtimeChatRefresh()
 	go func() {
 		scanCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1134,6 +1148,7 @@ func (a *App) TelegramLoadChats() ([]domain.ChatPolicy, error) {
 			return nil, err
 		}
 	}
+	a.requestRealtimeChatRefresh()
 	return a.store.ListChats(a.ctx)
 }
 
@@ -1488,6 +1503,15 @@ func (a *App) getStatus(ctx context.Context) (domain.IndexStatus, error) {
 	if lastSync > 0 {
 		status.LastSyncUnix = lastSync
 	}
+	syncMetrics, realtimeReconnects, realtimeLastErr, realtimeLastErrUnix := a.syncRuntimeMetricsSnapshot()
+	status.TelegramHistoryRequests = syncMetrics.HistoryRequests
+	status.TelegramFloodWaitEvents = syncMetrics.FloodWaitEvents
+	status.TelegramFloodWaitSeconds = syncMetrics.FloodWaitSeconds
+	status.TelegramBackfillSleeps = syncMetrics.BackfillSleeps
+	status.TelegramBatchCurrent = syncMetrics.BatchCurrent
+	status.RealtimeReconnects = realtimeReconnects
+	status.RealtimeLastError = realtimeLastErr
+	status.RealtimeLastErrorUnix = realtimeLastErrUnix
 	status.Touch()
 	return status, nil
 }
@@ -1870,6 +1894,11 @@ func (a *App) SyncNow() (domain.IndexStatus, error) {
 	return a.getStatus(a.ctx)
 }
 
+func (a *App) RealtimeRefreshNow() string {
+	a.requestRealtimeChatRefresh()
+	return "Realtime chat refresh requested"
+}
+
 func (a *App) runBackgroundSyncLoop(ctx context.Context) {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
@@ -1998,6 +2027,7 @@ func (a *App) backfillTelegramPDFs(ctx context.Context, sinceUnix int64) {
 }
 
 func (a *App) runRealtimeLoop(ctx context.Context) {
+	reconnectBackoff := realtimeReconnectBase
 	for {
 		select {
 		case <-ctx.Done():
@@ -2005,7 +2035,7 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 		default:
 		}
 
-		chatIDs, err := a.enabledChatIDs(ctx)
+		chatIDs, reactionEnabledChats, err := a.enabledRealtimeConfig(ctx)
 		if err != nil {
 			runtime.LogWarningf(a.ctx, "Realtime precheck failed: %v", err)
 			if !sleepOrDone(ctx, 15*time.Second) {
@@ -2020,54 +2050,212 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 			continue
 		}
 
-		realtimeReadMax := make(map[int64]int64, len(chatIDs))
-		burstCtx, cancel := context.WithTimeout(ctx, realtimeBurst)
-		err = a.telegramSvc.RunRealtime(burstCtx, chatIDs, func(event telegram.LiveEvent) error {
-			switch event.Kind {
-			case telegram.LiveEventUpsert:
-				if err := a.upsertMessageAndQueueURLs(burstCtx, domain.Message{
-					ChatID:        event.Message.ChatID,
-					MsgID:         event.Message.MsgID,
-					Timestamp:     event.Message.Timestamp,
-					EditTS:        event.Message.EditTS,
-					SenderID:      event.Message.SenderID,
-					SenderDisplay: event.Message.SenderDisplay,
-					Text:          event.Message.Text,
-					Deleted:       false,
-					HasURL:        event.Message.HasURL,
-				}); err != nil {
-					return err
+		runChatIDs := append([]int64(nil), chatIDs...)
+		realtimeReadMax := make(map[int64]int64, len(runChatIDs))
+		realtimeReactions := make(map[int64]map[int64]struct{}, len(runChatIDs))
+		var realtimeReadMu sync.Mutex
+		flushRealtimeActions := func(flushCtx context.Context) {
+			realtimeReadMu.Lock()
+			hasReads := len(realtimeReadMax) > 0
+			hasReactions := len(realtimeReactions) > 0
+			if !hasReads && !hasReactions {
+				realtimeReadMu.Unlock()
+				return
+			}
+			readBatch := make(map[int64]int64, len(realtimeReadMax))
+			for chatID, msgID := range realtimeReadMax {
+				readBatch[chatID] = msgID
+			}
+			clear(realtimeReadMax)
+			reactionBatch := make([]telegram.MessageReaction, 0, len(realtimeReactions)*2)
+			for chatID, messageSet := range realtimeReactions {
+				for msgID := range messageSet {
+					reactionBatch = append(reactionBatch, telegram.MessageReaction{
+						ChatID: chatID,
+						MsgID:  msgID,
+						Emoji:  eyesReactionEmoji,
+					})
 				}
-				trackReadMaxMessageID(realtimeReadMax, event.Message.ChatID, event.Message.MsgID)
-				return a.upsertFilesAndQueuePDFTasks(burstCtx, event.Files)
-			case telegram.LiveEventDelete:
-				if event.ChatID == 0 || event.MsgID == 0 {
+				delete(realtimeReactions, chatID)
+			}
+			realtimeReadMu.Unlock()
+			if len(readBatch) > 0 {
+				a.markChatsReadBestEffort(flushCtx, readBatch)
+			}
+			if len(reactionBatch) > 0 {
+				a.reactToMessagesBestEffort(flushCtx, reactionBatch)
+			}
+		}
+		runCtx, cancelRun := context.WithCancel(ctx)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- a.telegramSvc.RunRealtime(runCtx, runChatIDs, func(event telegram.LiveEvent) error {
+				switch event.Kind {
+				case telegram.LiveEventUpsert:
+					if err := a.upsertMessageAndQueueURLs(runCtx, domain.Message{
+						ChatID:        event.Message.ChatID,
+						MsgID:         event.Message.MsgID,
+						Timestamp:     event.Message.Timestamp,
+						EditTS:        event.Message.EditTS,
+						SenderID:      event.Message.SenderID,
+						SenderDisplay: event.Message.SenderDisplay,
+						Text:          event.Message.Text,
+						Deleted:       false,
+						HasURL:        event.Message.HasURL,
+					}); err != nil {
+						return err
+					}
+					realtimeReadMu.Lock()
+					trackReadMaxMessageID(realtimeReadMax, event.Message.ChatID, event.Message.MsgID)
+					if event.Message.IsOutgoing && reactionEnabledChats[event.Message.ChatID] {
+						chatSet, ok := realtimeReactions[event.Message.ChatID]
+						if !ok {
+							chatSet = map[int64]struct{}{}
+							realtimeReactions[event.Message.ChatID] = chatSet
+						}
+						chatSet[event.Message.MsgID] = struct{}{}
+					}
+					realtimeReadMu.Unlock()
+					return a.upsertFilesAndQueuePDFTasks(runCtx, event.Files)
+				case telegram.LiveEventDelete:
+					if event.ChatID == 0 || event.MsgID == 0 {
+						return nil
+					}
+					return a.deleteMessageAndTombstone(runCtx, event.ChatID, event.MsgID)
+				default:
 					return nil
 				}
-				return a.deleteMessageAndTombstone(burstCtx, event.ChatID, event.MsgID)
-			default:
-				return nil
-			}
-		})
-		cancel()
-		a.markChatsReadBestEffort(ctx, realtimeReadMax)
+			})
+		}()
 
-		if err != nil &&
-			!errors.Is(err, context.Canceled) &&
-			!errors.Is(err, context.DeadlineExceeded) &&
-			!errors.Is(err, telegram.ErrUnauthorized) &&
-			!errors.Is(err, telegram.ErrNotConfigured) {
-			runtime.LogWarningf(a.ctx, "Realtime burst failed: %v", err)
-			if !sleepOrDone(ctx, 10*time.Second) {
+		refreshTicker := time.NewTicker(realtimeChatRefreshInterval)
+		ackTicker := time.NewTicker(realtimeReadAckInterval)
+		var runErr error
+		var restartForChatSet bool
+	monitor:
+		for {
+			select {
+			case <-ctx.Done():
+				cancelRun()
+				select {
+				case <-errCh:
+				case <-time.After(2 * time.Second):
+				}
+				refreshTicker.Stop()
+				ackTicker.Stop()
+				flushRealtimeActions(ctx)
+				return
+			case <-a.realtimeRefreshSignal():
+				restartForChatSet = true
+				cancelRun()
+				select {
+				case runErr = <-errCh:
+				case <-time.After(2 * time.Second):
+					runErr = context.Canceled
+				}
+				break monitor
+			case runErr = <-errCh:
+				break monitor
+			case <-ackTicker.C:
+				flushRealtimeActions(runCtx)
+			case <-refreshTicker.C:
+				latestChatIDs, _, latestErr := a.enabledRealtimeConfig(ctx)
+				if latestErr != nil {
+					runtime.LogWarningf(a.ctx, "Realtime chat refresh failed: %v", latestErr)
+					continue
+				}
+				if !sameInt64Set(runChatIDs, latestChatIDs) {
+					restartForChatSet = true
+					cancelRun()
+					select {
+					case runErr = <-errCh:
+					case <-time.After(2 * time.Second):
+						runErr = context.Canceled
+					}
+					break monitor
+				}
+			}
+		}
+		refreshTicker.Stop()
+		ackTicker.Stop()
+		cancelRun()
+		flushRealtimeActions(ctx)
+
+		if ctx.Err() != nil {
+			return
+		}
+		if restartForChatSet {
+			reconnectBackoff = realtimeReconnectBase
+			continue
+		}
+
+		if runErr == nil || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			reconnectBackoff = realtimeReconnectBase
+			if !sleepOrDone(ctx, 500*time.Millisecond) {
 				return
 			}
 			continue
 		}
 
-		if !sleepOrDone(ctx, 2*time.Second) {
+		a.noteRealtimeRestart(runErr)
+		if errors.Is(runErr, telegram.ErrUnauthorized) || errors.Is(runErr, telegram.ErrNotConfigured) {
+			if !sleepOrDone(ctx, 15*time.Second) {
+				return
+			}
+			reconnectBackoff = realtimeReconnectBase
+			continue
+		}
+
+		runtime.LogWarningf(a.ctx, "Realtime stream failed: %v", runErr)
+		if !sleepOrDone(ctx, jitterDuration(reconnectBackoff)) {
 			return
 		}
+		reconnectBackoff = growRealtimeBackoff(reconnectBackoff)
 	}
+}
+
+func sameInt64Set(a []int64, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	index := make(map[int64]struct{}, len(a))
+	for _, value := range a {
+		index[value] = struct{}{}
+	}
+	for _, value := range b {
+		if _, ok := index[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func growRealtimeBackoff(current time.Duration) time.Duration {
+	if current < realtimeReconnectBase {
+		return realtimeReconnectBase
+	}
+	next := current * 2
+	if next > realtimeReconnectMax {
+		return realtimeReconnectMax
+	}
+	return next
+}
+
+func jitterDuration(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	spread := base / 5
+	if spread <= 0 {
+		return base
+	}
+	width := (spread * 2) + 1
+	jitter := time.Duration(time.Now().UnixNano()%int64(width)) - spread
+	value := base + jitter
+	if value < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return value
 }
 
 func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
@@ -2088,6 +2276,7 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 	}
 
 	states := make([]telegram.SyncChatState, 0, len(chats))
+	reactionEnabledChats := make(map[int64]bool, len(chats))
 	for _, chat := range chats {
 		if !chat.Enabled {
 			continue
@@ -2101,6 +2290,9 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 			SyncCursor:      cursor,
 			LastMessageUnix: chat.LastMessageUnix,
 		})
+		if isEyesReactionMode(chat.ReactionMode) {
+			reactionEnabledChats[chat.ChatID] = true
+		}
 	}
 
 	if len(states) == 0 {
@@ -2130,8 +2322,24 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 		a.setSyncStatus("error", progress, last)
 		return err
 	}
+	a.setTelegramSyncMetrics(report.Metrics)
+	if report.Metrics.HistoryRequests > 0 {
+		runtime.LogDebugf(
+			a.ctx,
+			"telegram sync metrics: req=%d flood=%d(%ds) sleeps=%d batch=%d min=%d max=%d skipped=%d",
+			report.Metrics.HistoryRequests,
+			report.Metrics.FloodWaitEvents,
+			report.Metrics.FloodWaitSeconds,
+			report.Metrics.BackfillSleeps,
+			report.Metrics.BatchCurrent,
+			report.Metrics.BatchMin,
+			report.Metrics.BatchMax,
+			report.Metrics.FloodSkippedChats,
+		)
+	}
 
 	syncReadMax := make(map[int64]int64, len(report.Messages))
+	syncReactions := make([]telegram.MessageReaction, 0, len(report.Messages))
 	for _, item := range report.Messages {
 		if upsertErr := a.upsertMessageAndQueueURLs(ctx, domain.Message{
 			ChatID:        item.ChatID,
@@ -2149,6 +2357,13 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 			return upsertErr
 		}
 		trackReadMaxMessageID(syncReadMax, item.ChatID, item.MsgID)
+		if item.IsOutgoing && reactionEnabledChats[item.ChatID] {
+			syncReactions = append(syncReactions, telegram.MessageReaction{
+				ChatID: item.ChatID,
+				MsgID:  item.MsgID,
+				Emoji:  eyesReactionEmoji,
+			})
+		}
 	}
 
 	if upsertErr := a.upsertFilesAndQueuePDFTasks(ctx, report.Files); upsertErr != nil {
@@ -2157,6 +2372,7 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 		return upsertErr
 	}
 	a.markChatsReadBestEffort(ctx, syncReadMax)
+	a.reactToMessagesBestEffort(ctx, syncReactions)
 
 	for _, item := range report.Chats {
 		if syncErr := a.store.UpdateChatSyncState(ctx, item.ChatID, item.NextCursor, item.LastMessageUnix, item.LastSyncedUnix); syncErr != nil {
@@ -2218,6 +2434,26 @@ func (a *App) enabledChatIDs(ctx context.Context) ([]int64, error) {
 	return chatIDs, nil
 }
 
+func (a *App) enabledRealtimeConfig(ctx context.Context) ([]int64, map[int64]bool, error) {
+	chats, err := a.store.ListChats(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	chatIDs := make([]int64, 0, len(chats))
+	reactionEnabled := make(map[int64]bool, len(chats))
+	for _, chat := range chats {
+		if !chat.Enabled {
+			continue
+		}
+		chatIDs = append(chatIDs, chat.ChatID)
+		if isEyesReactionMode(chat.ReactionMode) {
+			reactionEnabled[chat.ChatID] = true
+		}
+	}
+	return chatIDs, reactionEnabled, nil
+}
+
 func trackReadMaxMessageID(target map[int64]int64, chatID int64, msgID int64) {
 	if target == nil || chatID == 0 || msgID <= 0 {
 		return
@@ -2225,6 +2461,19 @@ func trackReadMaxMessageID(target map[int64]int64, chatID int64, msgID int64) {
 	if prev, ok := target[chatID]; !ok || msgID > prev {
 		target[chatID] = msgID
 	}
+}
+
+func normalizeReactionMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case reactionModeEyes:
+		return reactionModeEyes
+	default:
+		return reactionModeOff
+	}
+}
+
+func isEyesReactionMode(mode string) bool {
+	return normalizeReactionMode(mode) == reactionModeEyes
 }
 
 func (a *App) markChatsReadBestEffort(ctx context.Context, chatMaxMsgID map[int64]int64) {
@@ -2239,6 +2488,21 @@ func (a *App) markChatsReadBestEffort(ctx context.Context, chatMaxMsgID map[int6
 			return
 		}
 		runtime.LogWarningf(a.ctx, "mark chats read failed: %v", err)
+	}
+}
+
+func (a *App) reactToMessagesBestEffort(ctx context.Context, reactions []telegram.MessageReaction) {
+	if a.telegramSvc == nil || len(reactions) == 0 {
+		return
+	}
+
+	reactCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := a.telegramSvc.ReactToMessages(reactCtx, reactions); err != nil {
+		if errors.Is(err, telegram.ErrUnauthorized) || errors.Is(err, telegram.ErrNotConfigured) {
+			return
+		}
+		runtime.LogWarningf(a.ctx, "set message reactions failed: %v", err)
 	}
 }
 
@@ -3002,6 +3266,54 @@ func (a *App) syncSnapshot() (string, int, int64) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.syncState, a.syncBackfillProgress, a.syncLastUnix
+}
+
+func (a *App) requestRealtimeChatRefresh() {
+	a.mu.Lock()
+	if a.realtimeRefreshCh == nil {
+		a.realtimeRefreshCh = make(chan struct{}, 1)
+	}
+	ch := a.realtimeRefreshCh
+	a.mu.Unlock()
+
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) realtimeRefreshSignal() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.realtimeRefreshCh == nil {
+		a.realtimeRefreshCh = make(chan struct{}, 1)
+	}
+	return a.realtimeRefreshCh
+}
+
+func (a *App) setTelegramSyncMetrics(metrics telegram.SyncMetrics) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.tgSyncMetrics = metrics
+}
+
+func (a *App) noteRealtimeRestart(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.realtimeReconnects++
+	if err == nil {
+		a.realtimeLastError = ""
+		a.realtimeLastErrorUnix = 0
+		return
+	}
+	a.realtimeLastError = err.Error()
+	a.realtimeLastErrorUnix = time.Now().Unix()
+}
+
+func (a *App) syncRuntimeMetricsSnapshot() (telegram.SyncMetrics, int64, string, int64) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.tgSyncMetrics, a.realtimeReconnects, a.realtimeLastError, a.realtimeLastErrorUnix
 }
 
 func sleepOrDone(ctx context.Context, d time.Duration) bool {
