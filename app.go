@@ -16,6 +16,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	goruntime "runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1519,6 +1521,61 @@ func (a *App) getStatus(ctx context.Context) (domain.IndexStatus, error) {
 
 func (a *App) Status() (domain.IndexStatus, error) {
 	return a.getStatus(a.ctx)
+}
+
+func (a *App) BuildInfo() domain.BuildInfo {
+	info := domain.BuildInfo{
+		Version:     strings.TrimSpace(buildinfo.Version),
+		Commit:      strings.TrimSpace(buildinfo.Commit),
+		BuildTime:   strings.TrimSpace(buildinfo.BuildTime),
+		BuildSource: strings.TrimSpace(buildinfo.BuildSource),
+		GoVersion:   goruntime.Version(),
+		Target:      goruntime.GOOS + "/" + goruntime.GOARCH,
+	}
+
+	if info.Version == "" {
+		info.Version = "dev"
+	}
+	if info.BuildSource == "" {
+		info.BuildSource = "local"
+	}
+
+	if meta, ok := debug.ReadBuildInfo(); ok {
+		if strings.TrimSpace(meta.GoVersion) != "" {
+			info.GoVersion = strings.TrimSpace(meta.GoVersion)
+		}
+		goos := ""
+		goarch := ""
+		for _, setting := range meta.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if info.Commit == "" || info.Commit == "unknown" {
+					info.Commit = strings.TrimSpace(setting.Value)
+				}
+			case "vcs.time":
+				if info.BuildTime == "" || info.BuildTime == "unknown" {
+					info.BuildTime = strings.TrimSpace(setting.Value)
+				}
+			case "vcs.modified":
+				info.VCSModified = strings.EqualFold(strings.TrimSpace(setting.Value), "true")
+			case "GOOS":
+				goos = strings.TrimSpace(setting.Value)
+			case "GOARCH":
+				goarch = strings.TrimSpace(setting.Value)
+			}
+		}
+		if goos != "" && goarch != "" {
+			info.Target = goos + "/" + goarch
+		}
+	}
+
+	if info.Commit == "" {
+		info.Commit = "unknown"
+	}
+	if info.BuildTime == "" {
+		info.BuildTime = "unknown"
+	}
+	return info
 }
 
 func (a *App) MCPEndpoint() string {

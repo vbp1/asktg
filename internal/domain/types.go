@@ -153,6 +153,16 @@ type EmbeddingsProgress struct {
 	QueueFailed   int `json:"queue_failed"`
 }
 
+type BuildInfo struct {
+	Version     string `json:"version"`
+	Commit      string `json:"commit"`
+	BuildTime   string `json:"build_time"`
+	BuildSource string `json:"build_source"`
+	VCSModified bool   `json:"vcs_modified"`
+	GoVersion   string `json:"go_version"`
+	Target      string `json:"target"`
+}
+
 func (s *IndexStatus) Touch() {
 	s.UpdatedAtUnix = time.Now().Unix()
 }

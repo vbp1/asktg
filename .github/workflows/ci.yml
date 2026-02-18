@@ -158,7 +158,8 @@ jobs:
         env:
           APP_VERSION: ${{ needs.version.outputs.app_version }}
         run: |
-          $ldflags = "-X asktg/internal/buildinfo.Version=$env:APP_VERSION"
+          $buildTime = (Get-Date).ToUniversalTime().ToString("o")
+          $ldflags = "-X asktg/internal/buildinfo.Version=$env:APP_VERSION -X asktg/internal/buildinfo.Commit=$env:GITHUB_SHA -X asktg/internal/buildinfo.BuildTime=$buildTime -X asktg/internal/buildinfo.BuildSource=ci"
           wails build -clean -platform windows/amd64 -nsis -ldflags "$ldflags"
 
       - name: Upload build artifacts

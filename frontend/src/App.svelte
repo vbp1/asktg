@@ -53,6 +53,8 @@
   let storageEditMode = false;
   let currentPage = "search";
   let settingsTab = "runtime"; // "runtime" | "mcp" | "storage" | "telegram" | "embeddings" | "backup"
+  let buildInfo = null;
+  let buildInfoBusy = false;
 
   const THEME_STORAGE_KEY = "asktg.theme";
   const SELECTED_FOLDER_ID = 1000000000;
@@ -311,6 +313,14 @@
     return Math.max(-1, Math.min(1, numeric)).toFixed(3);
   }
 
+  function formatBuildTime(value) {
+    const raw = String(value || "").trim();
+    if (!raw || raw === "unknown") return "unknown";
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleString();
+  }
+
   function saveThemePreference(preference) {
     themePreference = preference;
     try {
@@ -334,6 +344,20 @@
       trayStatus = await backend().TrayStatus();
     } catch (error) {
       errorText = String(error);
+    }
+  }
+
+  async function refreshBuildInfo() {
+    if (!backend()?.BuildInfo) {
+      return;
+    }
+    buildInfoBusy = true;
+    try {
+      buildInfo = await backend().BuildInfo();
+    } catch (error) {
+      errorText = String(error);
+    } finally {
+      buildInfoBusy = false;
     }
   }
 
@@ -406,6 +430,9 @@
       startEmbeddingsProgressPolling();
     } else {
       stopEmbeddingsProgressPolling();
+    }
+    if (page === "about") {
+      refreshBuildInfo();
     }
   }
 
@@ -1095,6 +1122,7 @@
   refreshDataDir();
   refreshChats();
   refreshChatFolders();
+  refreshBuildInfo();
 
   onMount(() => {
     try {
@@ -1157,6 +1185,7 @@
         <button class:active={currentPage === "search"} on:click={() => openPage("search")}>Search</button>
         <button class:active={currentPage === "chats"} on:click={() => openPage("chats")}>Chats</button>
         <button class:active={currentPage === "settings"} on:click={() => openPage("settings")}>Settings</button>
+        <button class:active={currentPage === "about"} on:click={() => openPage("about")}>About</button>
       </div>
       {#if searchLocked}
         <p class="mutedLine">Search is locked until at least one chat is enabled (Chats).</p>
@@ -1536,6 +1565,31 @@
         </div>
       </section>
     {/if}
+  {/if}
+
+  {#if currentPage === "about"}
+    <section class="panel">
+      <h2>About</h2>
+      <p class="mutedLine">Version and build metadata embedded into this binary.</p>
+      <div class="row">
+        <button class="small" on:click={refreshBuildInfo} disabled={buildInfoBusy}>
+          {buildInfoBusy ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      {#if buildInfo}
+        <div class="status">
+          <span>Version: {buildInfo.version || "dev"}</span>
+          <span>Build source: {buildInfo.build_source || "local"}</span>
+          <span>Commit: {buildInfo.commit ? buildInfo.commit.slice(0, 12) : "unknown"}</span>
+          <span>Build time: {formatBuildTime(buildInfo.build_time)}</span>
+          <span>VCS modified: {buildInfo.vcs_modified ? "yes" : "no"}</span>
+          <span>Go: {buildInfo.go_version || "unknown"}</span>
+          <span>Target: {buildInfo.target || "unknown"}</span>
+        </div>
+      {:else}
+        <div class="empty">Build info unavailable.</div>
+      {/if}
+    </section>
   {/if}
 
   {#if currentPage === "chats"}

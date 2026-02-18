@@ -1,4 +1,7 @@
 package buildinfo
 
-// Version is set at build time via -ldflags.
+// Build metadata can be overridden at build time via -ldflags.
 var Version = "dev"
+var Commit = "unknown"
+var BuildTime = "unknown"
+var BuildSource = "local"
