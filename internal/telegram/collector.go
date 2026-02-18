@@ -348,6 +348,51 @@ func (s *Service) SyncChats(ctx context.Context, chats []SyncChatState, maxPerCh
 	return report, nil
 }
 
+// MarkChatsRead marks indexed messages as read in Telegram.
+// Broadcast channels are intentionally skipped.
+func (s *Service) MarkChatsRead(ctx context.Context, chatMaxMsgID map[int64]int64) error {
+	if len(chatMaxMsgID) == 0 {
+		return nil
+	}
+
+	apiID, apiHash, err := s.credentials()
+	if err != nil {
+		return err
+	}
+
+	return s.withClient(ctx, apiID, apiHash, func(runCtx context.Context, client *tdtelegram.Client) error {
+		authStatus, statusErr := client.Auth().Status(runCtx)
+		if statusErr != nil {
+			return statusErr
+		}
+		if !authStatus.Authorized {
+			return ErrUnauthorized
+		}
+
+		dialogLookup, collectErr := collectDialogLookup(runCtx, client)
+		if collectErr != nil {
+			return collectErr
+		}
+
+		var joinedErr error
+		for chatID, maxMsgID := range chatMaxMsgID {
+			if maxMsgID <= 0 {
+				continue
+			}
+
+			resolved, ok := dialogLookup[chatID]
+			if !ok || !shouldMarkDialogRead(resolved.dialog) {
+				continue
+			}
+
+			if err := markPeerRead(runCtx, client.API(), resolved.peer, int(maxMsgID)); err != nil {
+				joinedErr = errors.Join(joinedErr, fmt.Errorf("chat %d: %w", chatID, err))
+			}
+		}
+		return joinedErr
+	})
+}
+
 func (s *Service) RunRealtime(ctx context.Context, chatIDs []int64, onEvent func(LiveEvent) error) error {
 	if onEvent == nil {
 		return errors.New("onEvent callback is required")
@@ -667,6 +712,34 @@ func syncSingleChat(ctx context.Context, api *tg.Client, dialog resolvedDialog, 
 
 	result.NextCursor = strconv.Itoa(backfillOffset)
 	return result, messages, files, nil
+}
+
+func shouldMarkDialogRead(dialog Dialog) bool {
+	return strings.ToLower(strings.TrimSpace(dialog.Type)) != "channel"
+}
+
+func markPeerRead(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, maxMsgID int) error {
+	if api == nil || peer == nil || maxMsgID <= 0 {
+		return nil
+	}
+
+	switch p := peer.(type) {
+	case *tg.InputPeerChannel:
+		_, err := api.ChannelsReadHistory(ctx, &tg.ChannelsReadHistoryRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  p.ChannelID,
+				AccessHash: p.AccessHash,
+			},
+			MaxID: maxMsgID,
+		})
+		return err
+	default:
+		_, err := api.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{
+			Peer:  peer,
+			MaxID: maxMsgID,
+		})
+		return err
+	}
 }
 
 type entityLookup struct {

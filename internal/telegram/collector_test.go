@@ -69,3 +69,15 @@ func TestResolveSenderFallback(t *testing.T) {
 		t.Fatalf("expected outgoing fallback sender, got %d %q", senderID, sender)
 	}
 }
+
+func TestShouldMarkDialogRead(t *testing.T) {
+	if shouldMarkDialogRead(Dialog{Type: "channel"}) {
+		t.Fatal("expected broadcast channels to be skipped")
+	}
+	if !shouldMarkDialogRead(Dialog{Type: "group"}) {
+		t.Fatal("expected groups to be markable")
+	}
+	if !shouldMarkDialogRead(Dialog{Type: "private"}) {
+		t.Fatal("expected private chats to be markable")
+	}
+}

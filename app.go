@@ -2020,6 +2020,7 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 			continue
 		}
 
+		realtimeReadMax := make(map[int64]int64, len(chatIDs))
 		burstCtx, cancel := context.WithTimeout(ctx, realtimeBurst)
 		err = a.telegramSvc.RunRealtime(burstCtx, chatIDs, func(event telegram.LiveEvent) error {
 			switch event.Kind {
@@ -2037,6 +2038,7 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 				}); err != nil {
 					return err
 				}
+				trackReadMaxMessageID(realtimeReadMax, event.Message.ChatID, event.Message.MsgID)
 				return a.upsertFilesAndQueuePDFTasks(burstCtx, event.Files)
 			case telegram.LiveEventDelete:
 				if event.ChatID == 0 || event.MsgID == 0 {
@@ -2048,6 +2050,7 @@ func (a *App) runRealtimeLoop(ctx context.Context) {
 			}
 		})
 		cancel()
+		a.markChatsReadBestEffort(ctx, realtimeReadMax)
 
 		if err != nil &&
 			!errors.Is(err, context.Canceled) &&
@@ -2128,6 +2131,7 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 		return err
 	}
 
+	syncReadMax := make(map[int64]int64, len(report.Messages))
 	for _, item := range report.Messages {
 		if upsertErr := a.upsertMessageAndQueueURLs(ctx, domain.Message{
 			ChatID:        item.ChatID,
@@ -2144,6 +2148,7 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 			a.setSyncStatus("error", progress, last)
 			return upsertErr
 		}
+		trackReadMaxMessageID(syncReadMax, item.ChatID, item.MsgID)
 	}
 
 	if upsertErr := a.upsertFilesAndQueuePDFTasks(ctx, report.Files); upsertErr != nil {
@@ -2151,6 +2156,7 @@ func (a *App) syncEnabledChats(ctx context.Context, manual bool) error {
 		a.setSyncStatus("error", progress, last)
 		return upsertErr
 	}
+	a.markChatsReadBestEffort(ctx, syncReadMax)
 
 	for _, item := range report.Chats {
 		if syncErr := a.store.UpdateChatSyncState(ctx, item.ChatID, item.NextCursor, item.LastMessageUnix, item.LastSyncedUnix); syncErr != nil {
@@ -2210,6 +2216,30 @@ func (a *App) enabledChatIDs(ctx context.Context) ([]int64, error) {
 		}
 	}
 	return chatIDs, nil
+}
+
+func trackReadMaxMessageID(target map[int64]int64, chatID int64, msgID int64) {
+	if target == nil || chatID == 0 || msgID <= 0 {
+		return
+	}
+	if prev, ok := target[chatID]; !ok || msgID > prev {
+		target[chatID] = msgID
+	}
+}
+
+func (a *App) markChatsReadBestEffort(ctx context.Context, chatMaxMsgID map[int64]int64) {
+	if a.telegramSvc == nil || len(chatMaxMsgID) == 0 {
+		return
+	}
+
+	markCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	if err := a.telegramSvc.MarkChatsRead(markCtx, chatMaxMsgID); err != nil {
+		if errors.Is(err, telegram.ErrUnauthorized) || errors.Is(err, telegram.ErrNotConfigured) {
+			return
+		}
+		runtime.LogWarningf(a.ctx, "mark chats read failed: %v", err)
+	}
 }
 
 func (a *App) upsertFilesAndQueuePDFTasks(ctx context.Context, files []telegram.SyncedFile) error {
