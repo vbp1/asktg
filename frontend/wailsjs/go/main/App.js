@@ -14,6 +14,10 @@ export function BrowseDataDir() {
   return window['go']['main']['App']['BrowseDataDir']();
 }
 
+export function BuildInfo() {
+  return window['go']['main']['App']['BuildInfo']();
+}
+
 export function CompleteOnboarding() {
   return window['go']['main']['App']['CompleteOnboarding']();
 }

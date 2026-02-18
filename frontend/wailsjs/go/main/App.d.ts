@@ -8,6 +8,8 @@ export function BackgroundPaused():Promise<boolean>;
 
 export function BrowseDataDir():Promise<string>;
 
+export function BuildInfo():Promise<domain.BuildInfo>;
+
 export function CompleteOnboarding():Promise<domain.OnboardingStatus>;
 
 export function CreateBackup(arg1:string):Promise<string>;

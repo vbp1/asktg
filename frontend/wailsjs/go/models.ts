@@ -1,5 +1,29 @@
 export namespace domain {
 	
+	export class BuildInfo {
+	    version: string;
+	    commit: string;
+	    build_time: string;
+	    build_source: string;
+	    vcs_modified: boolean;
+	    go_version: string;
+	    target: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BuildInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.build_time = source["build_time"];
+	        this.build_source = source["build_source"];
+	        this.vcs_modified = source["vcs_modified"];
+	        this.go_version = source["go_version"];
+	        this.target = source["target"];
+	    }
+	}
 	export class ChatFolder {
 	    id: number;
 	    title: string;
