@@ -109,8 +109,8 @@ import (
 )
 
 type tgPayload struct {
-  ID   int    %q
-  Hash string %q
+  ID   int    %s
+  Hash string %s
 }
 
 const tgBlobB64 = %q
