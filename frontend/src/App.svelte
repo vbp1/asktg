@@ -54,7 +54,6 @@
   let currentPage = "search";
   let settingsTab = "runtime"; // "runtime" | "mcp" | "storage" | "telegram" | "embeddings" | "backup"
   let buildInfo = null;
-  let buildInfoBusy = false;
 
   const THEME_STORAGE_KEY = "asktg.theme";
   const SELECTED_FOLDER_ID = 1000000000;
@@ -351,13 +350,10 @@
     if (!backend()?.BuildInfo) {
       return;
     }
-    buildInfoBusy = true;
     try {
       buildInfo = await backend().BuildInfo();
     } catch (error) {
       errorText = String(error);
-    } finally {
-      buildInfoBusy = false;
     }
   }
 
@@ -1571,11 +1567,6 @@
     <section class="panel">
       <h2>About</h2>
       <p class="mutedLine">Version and build metadata embedded into this binary.</p>
-      <div class="row">
-        <button class="small" on:click={refreshBuildInfo} disabled={buildInfoBusy}>
-          {buildInfoBusy ? "Refreshing..." : "Refresh"}
-        </button>
-      </div>
       {#if buildInfo}
         <div class="status">
           <span>Version: {buildInfo.version || "dev"}</span>
