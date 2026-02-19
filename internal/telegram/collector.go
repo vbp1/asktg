@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -17,11 +18,13 @@ import (
 
 	tdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/telegram/query"
 	"github.com/gotd/td/telegram/query/dialogs"
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"rsc.io/qr"
 )
 
 const channelChatIDOffset int64 = 1_000_000_000_000
@@ -145,10 +148,13 @@ type Service struct {
 	mu           sync.RWMutex
 	runMu        sync.Mutex
 	throttleMu   sync.Mutex
+	qrMu         sync.Mutex
 	apiID        int
 	apiHash      string
 	pendingPhone string
 	pendingHash  string
+	qrCancel     context.CancelFunc
+	qrPasswordCh chan string
 
 	backfillLastGlobalReqAt time.Time
 	backfillLastReqByChat   map[int64]time.Time
@@ -285,6 +291,142 @@ func (s *Service) SignIn(ctx context.Context, code, password string) (AuthStatus
 
 	s.clearPending()
 	return s.AuthStatus(ctx)
+}
+
+func (s *Service) QRLogin(ctx context.Context, showQR func(token domain.TelegramQRToken) error) (AuthStatus, error) {
+	apiID, apiHash, err := s.credentials()
+	if err != nil {
+		return AuthStatus{}, err
+	}
+
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	qrCtx, qrCancel := context.WithCancel(ctx)
+	defer qrCancel()
+
+	s.qrMu.Lock()
+	s.qrCancel = qrCancel
+	s.qrMu.Unlock()
+	defer func() {
+		s.qrMu.Lock()
+		s.qrCancel = nil
+		s.qrMu.Unlock()
+	}()
+
+	dispatcher := tg.NewUpdateDispatcher()
+	loggedIn := qrlogin.OnLoginToken(dispatcher)
+
+	var authResult AuthStatus
+	err = s.withClientUsingOptions(qrCtx, apiID, apiHash, tdtelegram.Options{
+		SessionStorage: &SafeFileSessionStorage{
+			Path: s.sessionPath,
+		},
+		UpdateHandler: dispatcher,
+	}, func(runCtx context.Context, client *tdtelegram.Client) error {
+		status, statusErr := client.Auth().Status(runCtx)
+		if statusErr != nil {
+			return statusErr
+		}
+		if status.Authorized {
+			authResult.Configured = true
+			authResult.Authorized = true
+			if status.User != nil {
+				authResult.UserDisplay = formatUserDisplay(status.User)
+			}
+			return nil
+		}
+
+		_, authErr := client.QR().Auth(runCtx, loggedIn, func(_ context.Context, token qrlogin.Token) error {
+			code, codeErr := qr.Encode(token.URL(), qr.M)
+			if codeErr != nil {
+				return codeErr
+			}
+			dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
+			return showQR(domain.TelegramQRToken{
+				DataURI:   dataURI,
+				ExpiresAt: token.Expires().Unix(),
+			})
+		})
+		if authErr != nil {
+			if !isPasswordNeeded(authErr) {
+				return authErr
+			}
+			if notifyErr := showQR(domain.TelegramQRToken{PasswordNeeded: true}); notifyErr != nil {
+				return notifyErr
+			}
+			passwordCh := s.getPasswordCh()
+			var password string
+			select {
+			case password = <-passwordCh:
+			case <-runCtx.Done():
+				return runCtx.Err()
+			}
+			if _, pwdErr := client.Auth().Password(runCtx, password); pwdErr != nil {
+				return pwdErr
+			}
+		}
+
+		newStatus, statusErr := client.Auth().Status(runCtx)
+		if statusErr != nil {
+			return statusErr
+		}
+		authResult.Configured = true
+		authResult.Authorized = newStatus.Authorized
+		if newStatus.User != nil {
+			authResult.UserDisplay = formatUserDisplay(newStatus.User)
+		}
+		return nil
+	})
+	if err != nil {
+		return AuthStatus{}, err
+	}
+	return authResult, nil
+}
+
+func (s *Service) CancelQRLogin() {
+	s.qrMu.Lock()
+	defer s.qrMu.Unlock()
+	if s.qrCancel != nil {
+		s.qrCancel()
+	}
+}
+
+func (s *Service) SubmitQRPassword(password string) {
+	s.qrMu.Lock()
+	ch := s.qrPasswordCh
+	s.qrMu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- password:
+		default:
+		}
+	}
+}
+
+func (s *Service) getPasswordCh() chan string {
+	s.qrMu.Lock()
+	defer s.qrMu.Unlock()
+	if s.qrPasswordCh == nil {
+		s.qrPasswordCh = make(chan string, 1)
+	} else {
+		// drain stale value
+		select {
+		case <-s.qrPasswordCh:
+		default:
+		}
+	}
+	return s.qrPasswordCh
+}
+
+func isPasswordNeeded(err error) bool {
+	if errors.Is(err, auth.ErrPasswordAuthNeeded) {
+		return true
+	}
+	if rpcErr, ok := tgerr.As(err); ok {
+		return rpcErr.IsOneOf("SESSION_PASSWORD_NEEDED")
+	}
+	return false
 }
 
 func (s *Service) ListDialogs(ctx context.Context) ([]Dialog, error) {

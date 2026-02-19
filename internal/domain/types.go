@@ -111,6 +111,12 @@ type TelegramAuthStatus struct {
 	UserDisplay  string `json:"user_display"`
 }
 
+type TelegramQRToken struct {
+	DataURI        string `json:"data_uri"`
+	ExpiresAt      int64  `json:"expires_at"`
+	PasswordNeeded bool   `json:"password_needed,omitempty"`
+}
+
 type EmbeddingsConfig struct {
 	BaseURL    string `json:"base_url"`
 	Model      string `json:"model"`

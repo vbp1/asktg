@@ -78,6 +78,12 @@ export function TelegramChatFolders():Promise<Array<domain.ChatFolder>>;
 
 export function TelegramLoadChats():Promise<Array<domain.ChatPolicy>>;
 
+export function TelegramQRLogin():Promise<domain.TelegramAuthStatus>;
+
+export function TelegramQRLoginCancel():Promise<void>;
+
+export function TelegramQRLoginPassword(arg1:string):Promise<void>;
+
 export function TelegramRequestCode(arg1:string):Promise<domain.TelegramAuthStatus>;
 
 export function TelegramSetCredentials(arg1:number,arg2:string):Promise<void>;

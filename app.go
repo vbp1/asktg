@@ -1133,6 +1133,42 @@ func (a *App) TelegramSignIn(code string, password string) (domain.TelegramAuthS
 	}, nil
 }
 
+func (a *App) TelegramQRLogin() (domain.TelegramAuthStatus, error) {
+	if a.telegramSvc == nil {
+		return domain.TelegramAuthStatus{}, errors.New("telegram service is not initialized")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
+	defer cancel()
+	status, err := a.telegramSvc.QRLogin(ctx, func(token domain.TelegramQRToken) error {
+		runtime.EventsEmit(a.ctx, "telegram:qr-token", token)
+		return nil
+	})
+	if err != nil {
+		return domain.TelegramAuthStatus{}, err
+	}
+	return domain.TelegramAuthStatus{
+		Configured:   status.Configured,
+		Authorized:   status.Authorized,
+		AwaitingCode: status.AwaitingCode,
+		Phone:        status.Phone,
+		UserDisplay:  status.UserDisplay,
+	}, nil
+}
+
+func (a *App) TelegramQRLoginCancel() {
+	if a.telegramSvc == nil {
+		return
+	}
+	a.telegramSvc.CancelQRLogin()
+}
+
+func (a *App) TelegramQRLoginPassword(password string) {
+	if a.telegramSvc == nil {
+		return
+	}
+	a.telegramSvc.SubmitQRPassword(password)
+}
+
 func (a *App) TelegramLoadChats() ([]domain.ChatPolicy, error) {
 	if a.store == nil {
 		return nil, errors.New("store is not initialized")
@@ -1662,11 +1698,20 @@ func (a *App) CreateBackup(destination string) (string, error) {
 			return "", err
 		}
 	}
+	sessionPath := filepath.Join(a.cfg.DataDir, "telegram", "session.json")
+	hasSession := fileExists(sessionPath)
+	if hasSession {
+		if err := addFileToZip(zipWriter, sessionPath, "telegram/session.json"); err != nil {
+			_ = zipWriter.Close()
+			return "", err
+		}
+	}
 	manifest := map[string]any{
-		"created_at":   time.Now().UTC().Format(time.RFC3339),
-		"db_file":      "app.db",
-		"includes_vec": fileExists(graphPath),
-		"version":      buildinfo.Version,
+		"created_at":      time.Now().UTC().Format(time.RFC3339),
+		"db_file":         "app.db",
+		"includes_vec":    fileExists(graphPath),
+		"includes_session": hasSession,
+		"version":         buildinfo.Version,
 	}
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -1738,6 +1783,16 @@ func (a *App) RestoreBackup(backupPath string) (string, error) {
 		}
 	} else {
 		_ = os.Remove(targetGraph)
+	}
+	restoredSession := filepath.Join(tempDir, "telegram", "session.json")
+	if fileExists(restoredSession) {
+		targetSession := filepath.Join(a.cfg.DataDir, "telegram", "session.json")
+		if err := os.MkdirAll(filepath.Dir(targetSession), 0o755); err != nil {
+			return "", err
+		}
+		if err := copyFile(restoredSession, targetSession); err != nil {
+			return "", err
+		}
 	}
 
 	dbStore, err := sqlite.Open(a.cfg.DBPath())
