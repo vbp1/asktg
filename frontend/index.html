@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>asktg</title>
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem("asktg.theme") || "system";
+          var theme = pref;
+          if (pref !== "light" && pref !== "dark") {
+            theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {
+          // ignore
+        }
+      })();
+    </script>
+</head>
+<body>
+<div id="app"></div>
+<script src="./src/main.js" type="module"></script>
+</body>
+</html>

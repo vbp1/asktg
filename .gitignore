@@ -30,3 +30,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Project-specific
+build/bin
+node_modules
+frontend/dist
+tg_secrets_generated.go
+tg_secrets.local.json
