@@ -1,56 +1,96 @@
 # asktg
 
-Windows-first Telegram sidecar search desktop app built with Go + Wails.
+Local desktop search for your Telegram chats. Index selected conversations, search with full-text and semantic retrieval through a built-in GUI, and optionally expose results to LLM agents via an MCP server.
 
-## Current State
-- Wails desktop shell + Svelte UI.
-- SQLite schema + FTS5-based message search.
-- Hybrid retrieval: FTS + HNSW vector search (RRF fusion).
-- Embeddings ingestion is tail-only per chat (no automatic history backfill when toggled on).
-- Per-chat policy management (enabled/history/embeddings/url mode).
-- Read-only MCP server (streamable HTTP on loopback).
-- MCP runtime controls in UI (enable/disable, port override, endpoint copy).
-- MCP tools return structured metadata, snippets, and deep links for search/message retrieval.
-- Backup/restore and purge flows in UI.
-- Vector graph persistence to `vectors.graph` with rebuild workflow.
-- Secret settings are protected with Windows DPAPI (`telegram_api_hash`, `embeddings_api_key`).
-- Mandatory onboarding flow: Telegram setup + chat discovery + require at least one enabled chat before search/sync.
-- Windows autostart toggle in Maintenance (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
-- Pause/Resume background workers from UI while keeping local search available.
-- Explicit `Exit app` action for close-to-tray flow.
-- Native Windows tray icon/menu (`Show Window` / `Hide Window` / `Exit`) with single-instance restore.
-- Tray interaction policy: left click restores hidden window, right click opens tray context menu.
-- `Open in Telegram` now falls back to chat-level deep-link when message-level deep-link is unavailable.
-- Search result cards support `Copy link/reference` only when deep-link is available.
-- URL-matched results display linked page metadata (title/url) plus the source Telegram message text.
-- Security baseline utilities:
-  - URL fetch guard against localhost/private/link-local targets.
-  - MCP origin validation for local origins.
+Built with Go, Svelte, and [Wails](https://wails.io). Windows-first.
 
-## Run (dev)
+## Features
+
+- **Full-text search** — SQLite FTS5 with BM25 ranking and advanced query syntax (AND, OR, NOT, phrase, prefix)
+- **Hybrid search** — combines FTS with HNSW vector search using reciprocal rank fusion (RRF); powered by any OpenAI-compatible embeddings API
+- **Per-chat policies** — fine-grained control over which chats to index, history depth, URL/PDF extraction, and embeddings
+- **URL & PDF indexing** — extracts and indexes text from links and PDF attachments found in messages
+- **Realtime sync** — periodic background sync plus instant updates for new, edited, and deleted messages
+- **MCP server** — read-only HTTP server on localhost with tools for `search_messages`, `get_message`, `list_chats`, and `index_status`; connect it to Claude or any MCP-compatible LLM agent
+- **Windows integration** — system tray icon, close-to-tray, autostart, single-instance restore
+- **Backup & restore** — full data backup/restore and purge from the UI
+- **Security** — secrets protected with Windows DPAPI; URL fetch guard against SSRF; MCP origin validation (localhost only)
+
+## Prerequisites
+
+- Windows 10/11
+- [Telegram API credentials](https://my.telegram.org/apps) (API ID and API Hash)
+- *(Optional)* An OpenAI-compatible embeddings API key for semantic search
+
+## Getting Started
+
+1. **Download** a release from the [Releases](https://github.com/vbp1/asktg/releases) page, or build from source (see [Development](#development)).
+
+2. **Launch** `asktg.exe`. The onboarding wizard will guide you through:
+   - Entering your Telegram API ID and API Hash
+   - Logging in with your phone number and verification code (2FA supported)
+   - Discovering and enabling at least one chat for indexing
+
+3. **Search** — once indexing completes, use the Search tab to query your messages. Toggle between simple and advanced (FTS5 syntax) modes, filter by chat or date range.
+
+4. **Configure chats** — in the Chats tab, set per-chat policies:
+   - **History** — `off` / `lazy` (new messages only) / `full` (backfill entire history)
+   - **URLs** — `off` / `lazy` / `full` — controls URL text extraction
+   - **Embeddings** — enable semantic search per chat
+
+5. **Enable semantic search** *(optional)* — go to Settings, enter your embeddings API endpoint, model, and API key. Enable embeddings on desired chats.
+
+6. **Connect an LLM agent** *(optional)* — enable the MCP server in Settings, copy the endpoint URL, and add it to your agent's MCP config. The server exposes read-only search tools on `127.0.0.1`.
+
+## Data Directory
+
+Default: `%LOCALAPPDATA%\asktg`
+
+You can pick a custom data directory during onboarding or later in Settings. Override for the current process:
+
 ```powershell
+$env:ASKTG_DATA_DIR = "D:\my-asktg-data"
+```
+
+Contents:
+- `app.db` — SQLite database (messages, chat policies, task queue)
+- `vectors.graph` — HNSW vector index
+- `telegram/session.json` — Telegram session state
+
+## Development
+
+Requires **Go 1.24+**, **Node.js 18+**, and the [Wails CLI](https://wails.io/docs/gettingstarted/installation).
+
+```bash
+# Run in dev mode (hot-reload UI)
 wails dev
-```
 
-## Test
-```powershell
+# Run tests
 go test ./...
-```
 
-## Build
-```powershell
+# Production build
 wails build
 ```
 
-## Data Directory
-Default: `%LOCALAPPDATA%\asktg`
-- You can pick and persist a custom data directory from the onboarding wizard (`Browse data dir` / `Apply data dir`), then restart app.
-- `ASKTG_DATA_DIR` environment variable still overrides persisted/app defaults for the current process.
-Manual override with environment variable:
-```powershell
-$env:ASKTG_DATA_DIR = "C:\path\to\data"
+Output binary: `build/bin/asktg.exe`
+
+### Telegram API Credentials for Development
+
+Create `tg_secrets.local.json` in the project root (gitignored):
+
+```json
+{
+  "id": "YOUR_APP_ID",
+  "hash": "YOUR_APP_HASH"
+}
 ```
 
-## MCP Endpoint
-The app starts MCP with desktop runtime and exposes endpoint in UI status.  
-Transport: streamable HTTP on `127.0.0.1`.
+Then generate the encrypted secrets file:
+
+```bash
+go generate ./...
+```
+
+## License
+
+[MIT](LICENSE)
