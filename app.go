@@ -193,7 +193,7 @@ func (a *App) seedTelegramCredentials(ctx context.Context) {
 		return
 	}
 
-	if err := a.TelegramSetCredentials(apiID, apiHash); err != nil {
+	if err := a.telegramSetCredentials(apiID, apiHash); err != nil {
 		runtime.LogWarningf(ctx, "Telegram credential seed failed: %v", err)
 		return
 	}
@@ -780,7 +780,7 @@ func (a *App) SetChatPolicy(chatID int64, enabled bool, historyMode string, allo
 	return nil
 }
 
-func (a *App) TelegramSetCredentials(apiID int, apiHash string) error {
+func (a *App) telegramSetCredentials(apiID int, apiHash string) error {
 	if a.store == nil {
 		return errors.New("store is not initialized")
 	}

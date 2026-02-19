@@ -86,8 +86,6 @@ export function TelegramQRLoginPassword(arg1:string):Promise<void>;
 
 export function TelegramRequestCode(arg1:string):Promise<domain.TelegramAuthStatus>;
 
-export function TelegramSetCredentials(arg1:number,arg2:string):Promise<void>;
-
 export function TelegramSignIn(arg1:string,arg2:string):Promise<domain.TelegramAuthStatus>;
 
 export function TestEmbeddings():Promise<domain.EmbeddingsTestResult>;

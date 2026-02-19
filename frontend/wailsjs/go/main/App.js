@@ -170,10 +170,6 @@ export function TelegramRequestCode(arg1) {
   return window['go']['main']['App']['TelegramRequestCode'](arg1);
 }
 
-export function TelegramSetCredentials(arg1, arg2) {
-  return window['go']['main']['App']['TelegramSetCredentials'](arg1, arg2);
-}
-
 export function TelegramSignIn(arg1, arg2) {
   return window['go']['main']['App']['TelegramSignIn'](arg1, arg2);
 }
