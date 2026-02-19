@@ -22,11 +22,20 @@ Built with Go, Svelte, and [Wails](https://wails.io). Windows-first.
 - [Telegram API credentials](https://my.telegram.org/apps) (API ID and API Hash)
 - *(Optional)* An OpenAI-compatible embeddings API key for semantic search
 
+## Installation
+
+Download the latest version from the [Releases](https://github.com/vbp1/asktg/releases) page. Each release includes two options:
+
+| File | Description |
+|------|-------------|
+| `asktg-amd64-installer.exe` | NSIS installer — sets up the app, creates Start Menu shortcut, and provides an uninstaller |
+| `asktg.exe` | Standalone portable binary — no installation required, just run it |
+
+Alternatively, build from source (see [Development](#development)).
+
 ## Getting Started
 
-1. **Download** a release from the [Releases](https://github.com/vbp1/asktg/releases) page, or build from source (see [Development](#development)).
-
-2. **Launch** `asktg.exe`. The onboarding wizard will guide you through:
+1. **Launch** `asktg.exe`. The onboarding wizard will guide you through:
    - Entering your Telegram API ID and API Hash
    - Logging in with your phone number and verification code (2FA supported)
    - Discovering and enabling at least one chat for indexing
