@@ -1,5 +1,6 @@
 <script>
   import { onMount } from "svelte";
+  import { EventsOn } from "../wailsjs/runtime/runtime";
   import topbarIcon from "./assets/topbar-icon.jpg";
 
   const backend = () => window?.go?.main?.App;
@@ -26,6 +27,12 @@
   let tgCode = "";
   let tgPassword = "";
   let telegramEditMode = false;
+  let tgAuthMethod = "qr"; // "qr" | "phone"
+  let qrDataURI = "";
+  let qrActive = false;
+  let qrCleanup = null;
+  let qrPasswordNeeded = false;
+  let qrPassword = "";
   let backupPath = "";
   let restorePath = "";
   let embBaseURL = "";
@@ -747,6 +754,52 @@
     return ok;
   }
 
+  async function startQRLogin() {
+    if (qrActive) return;
+    qrActive = true;
+    qrDataURI = "";
+    qrPasswordNeeded = false;
+    qrPassword = "";
+    errorText = "";
+    telegramBusy = true;
+    if (qrCleanup) { qrCleanup(); qrCleanup = null; }
+    qrCleanup = EventsOn("telegram:qr-token", (token) => {
+      if (token?.password_needed) {
+        qrPasswordNeeded = true;
+        qrDataURI = "";
+      } else {
+        qrDataURI = token?.data_uri || "";
+      }
+    });
+    try {
+      telegramStatus = await backend().TelegramQRLogin();
+      await refreshTelegramStatus();
+      await refreshChats();
+      await refreshOnboardingStatus();
+    } catch (error) {
+      if (!String(error).includes("context canceled")) {
+        errorText = String(error);
+      }
+    } finally {
+      qrActive = false;
+      qrDataURI = "";
+      qrPasswordNeeded = false;
+      qrPassword = "";
+      telegramBusy = false;
+      if (qrCleanup) { qrCleanup(); qrCleanup = null; }
+    }
+  }
+
+  function cancelQRLogin() {
+    try { backend().TelegramQRLoginCancel(); } catch (_) {}
+  }
+
+  function submitQRPassword() {
+    const pw = (qrPassword || "").trim();
+    if (!pw) return;
+    try { backend().TelegramQRLoginPassword(pw); } catch (_) {}
+  }
+
   async function refreshRealtimeFromChats() {
     chatsRefreshBusy = true;
     errorText = "";
@@ -1452,37 +1505,95 @@
     {#if settingsTab === "telegram"}
     <section class="panel">
       <h2>Telegram Account</h2>
-      <div class="tgGrid">
-        <input bind:value={tgPhone} placeholder="Phone (+123...)" disabled={!telegramEditMode} />
-        <input bind:value={tgCode} placeholder="Login code" disabled={!telegramEditMode} />
-        <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" disabled={!telegramEditMode} />
-      </div>
-      <div class="row">
-        {#if telegramEditMode}
-          <button on:click={requestTelegramCode} disabled={telegramBusy || !tgPhone.trim()}>
-            {telegramBusy ? "Working..." : "Send code"}
-          </button>
-          <button on:click={applyTelegramEdit} disabled={telegramBusy || !tgPhone.trim()}>
-            {telegramBusy ? "Working..." : "Apply"}
-          </button>
-          <button on:click={cancelTelegramEdit} disabled={telegramBusy}>Cancel</button>
-        {:else}
-          <button on:click={startTelegramEdit} disabled={telegramBusy}>Change</button>
-        {/if}
-        <button on:click={loadTelegramChats} disabled={telegramBusy || (!telegramEditMode && !telegramConfigured)}>
-          {telegramBusy ? "Working..." : "Load chats"}
-        </button>
-      </div>
-      {#if telegramStatus}
+
+      {#if telegramStatus?.authorized}
         <div class="status">
-          <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
-          <span>Authorized: {telegramStatus.authorized ? "yes" : "no"}</span>
-          <span>Code pending: {telegramStatus.awaiting_code ? "yes" : "no"}</span>
-          <span>Phone: {telegramStatus.phone || "n/a"}</span>
+          <span>Authorized: yes</span>
           <span>User: {telegramStatus.user_display || "n/a"}</span>
+        </div>
+        <div class="row">
+          <button on:click={startTelegramEdit} disabled={telegramBusy}>Change</button>
+          <button on:click={loadTelegramChats} disabled={telegramBusy}>
+            {telegramBusy ? "Working..." : "Load chats"}
+          </button>
+        </div>
+      {:else}
+        <div class="authTabs">
+          <button class:active={tgAuthMethod === "qr"} on:click={() => (tgAuthMethod = "qr")}>QR Code</button>
+          <button class:active={tgAuthMethod === "phone"} on:click={() => { tgAuthMethod = "phone"; if (!telegramEditMode) startTelegramEdit(); }}>Phone Number</button>
+        </div>
+
+        {#if tgAuthMethod === "qr"}
+          <p class="qrHint" style="text-align:left;max-width:none">Scan a QR code with your phone to log in instantly. No SMS code needed.</p>
+          <div class="row">
+            <button on:click={startQRLogin} disabled={telegramBusy || !telegramConfigured}>
+              {telegramBusy ? "Working..." : "Login with QR"}
+            </button>
+            <button on:click={loadTelegramChats} disabled>Load chats</button>
+          </div>
+        {:else}
+          <div class="tgGrid">
+            <input bind:value={tgPhone} placeholder="Phone (+123...)" disabled={!telegramEditMode} />
+            <input bind:value={tgCode} placeholder="Login code" disabled={!telegramEditMode} />
+            <input bind:value={tgPassword} placeholder="2FA password (optional)" type="password" disabled={!telegramEditMode} />
+          </div>
+          <div class="row">
+            {#if telegramEditMode}
+              <button on:click={requestTelegramCode} disabled={telegramBusy || !tgPhone.trim()}>
+                {telegramBusy ? "Working..." : "Send code"}
+              </button>
+              <button on:click={applyTelegramEdit} disabled={telegramBusy || !tgPhone.trim()}>
+                {telegramBusy ? "Working..." : "Apply"}
+              </button>
+              <button on:click={cancelTelegramEdit} disabled={telegramBusy}>Cancel</button>
+            {:else}
+              <button on:click={startTelegramEdit} disabled={telegramBusy}>Change</button>
+            {/if}
+            <button on:click={loadTelegramChats} disabled>Load chats</button>
+          </div>
+        {/if}
+      {/if}
+
+      {#if telegramStatus && !telegramStatus.authorized}
+        <div class="status" style="margin-top:8px">
+          <span>Configured: {telegramStatus.configured ? "yes" : "no"}</span>
+          <span>Authorized: no</span>
+          {#if telegramStatus.awaiting_code}<span>Code pending: yes</span>{/if}
+          {#if telegramStatus.phone}<span>Phone: {telegramStatus.phone}</span>{/if}
         </div>
       {/if}
     </section>
+
+    {#if qrActive}
+    <div class="qrModal" on:click|self={cancelQRLogin}>
+      <div class="qrModalContent">
+        {#if qrPasswordNeeded}
+          <h3>2FA Password</h3>
+          <p class="qrHint">Your account has two-factor authentication.<br/>Enter your password to complete login.</p>
+          <input
+            type="password"
+            bind:value={qrPassword}
+            placeholder="2FA password"
+            on:keydown={(e) => { if (e.key === "Enter") submitQRPassword(); }}
+            style="width:240px"
+          />
+          <div class="row">
+            <button on:click={submitQRPassword} disabled={!(qrPassword || "").trim()}>Submit</button>
+            <button on:click={cancelQRLogin}>Cancel</button>
+          </div>
+        {:else}
+          <h3>Scan QR Code</h3>
+          {#if qrDataURI}
+            <img class="qrImage" src={qrDataURI} alt="Telegram QR Login" width="240" height="240" />
+          {:else}
+            <div class="qrPlaceholder">Generating QR code...</div>
+          {/if}
+          <p class="qrHint">Open Telegram on your phone, go to<br/>Settings &rarr; Devices &rarr; Link Desktop Device,<br/>then scan this QR code.</p>
+          <button on:click={cancelQRLogin}>Cancel</button>
+        {/if}
+      </div>
+    </div>
+    {/if}
     {/if}
 
     {#if settingsTab === "embeddings"}

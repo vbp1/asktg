@@ -12,6 +12,7 @@ require (
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/sys v0.38.0
 	modernc.org/sqlite v1.44.3
+	rsc.io/qr v0.2.0
 )
 
 require (
@@ -86,7 +87,6 @@ require (
 	modernc.org/libc v1.67.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.11.0 => C:\Users\vbpon\go\pkg\mod

@@ -154,6 +154,18 @@ export function TelegramLoadChats() {
   return window['go']['main']['App']['TelegramLoadChats']();
 }
 
+export function TelegramQRLogin() {
+  return window['go']['main']['App']['TelegramQRLogin']();
+}
+
+export function TelegramQRLoginCancel() {
+  return window['go']['main']['App']['TelegramQRLoginCancel']();
+}
+
+export function TelegramQRLoginPassword(arg1) {
+  return window['go']['main']['App']['TelegramQRLoginPassword'](arg1);
+}
+
 export function TelegramRequestCode(arg1) {
   return window['go']['main']['App']['TelegramRequestCode'](arg1);
 }
