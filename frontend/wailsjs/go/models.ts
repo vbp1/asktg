@@ -256,6 +256,9 @@ export namespace domain {
 	    file_doc_id?: number;
 	    score: number;
 	    semantic_similarity?: number;
+	    rrf_score?: number;
+	    rrf_rank?: number;
+	    recency_boost?: number;
 	    deep_link?: string;
 	    match_fts?: boolean;
 	    match_semantic?: boolean;
@@ -285,6 +288,9 @@ export namespace domain {
 	        this.file_doc_id = source["file_doc_id"];
 	        this.score = source["score"];
 	        this.semantic_similarity = source["semantic_similarity"];
+	        this.rrf_score = source["rrf_score"];
+	        this.rrf_rank = source["rrf_rank"];
+	        this.recency_boost = source["recency_boost"];
 	        this.deep_link = source["deep_link"];
 	        this.match_fts = source["match_fts"];
 	        this.match_semantic = source["match_semantic"];
