@@ -150,6 +150,14 @@ jobs:
           $gopath = go env GOPATH
           "$gopath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Generate embedded Telegram secrets
+        if: env.TG_API_ID != ''
+        shell: bash
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: go run ./internal/tools/tgsecrets -env -out tg_secrets_generated.go
+
       - name: Show build version
         run: echo "Building version ${{ needs.version.outputs.app_version }}"
 

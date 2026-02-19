@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -28,20 +29,33 @@ type payload struct {
 func main() {
 	inPath := flag.String("in", defaultIn, "path to local secrets json (gitignored)")
 	outPath := flag.String("out", defaultOut, "path to generated go file (gitignored)")
+	envMode := flag.Bool("env", false, "read TG_API_ID and TG_API_HASH from environment variables")
 	flag.Parse()
 
-	raw, err := os.ReadFile(filepath.Clean(*inPath))
-	if err != nil {
-		fatal(fmt.Errorf("read %s: %w", *inPath, err))
-	}
-
 	var p payload
-	if err := json.Unmarshal(raw, &p); err != nil {
-		fatal(fmt.Errorf("parse %s: %w", *inPath, err))
-	}
-	p.Hash = strings.TrimSpace(p.Hash)
-	if p.ID <= 0 || p.Hash == "" {
-		fatal(errors.New("invalid secrets file: expected {\"id\": <positive int>, \"hash\": \"...\"}"))
+	if *envMode {
+		idStr := strings.TrimSpace(os.Getenv("TG_API_ID"))
+		hashStr := strings.TrimSpace(os.Getenv("TG_API_HASH"))
+		if idStr == "" || hashStr == "" {
+			fatal(errors.New("TG_API_ID and TG_API_HASH environment variables are required with -env flag"))
+		}
+		id, err := strconv.Atoi(idStr)
+		if err != nil || id <= 0 {
+			fatal(fmt.Errorf("invalid TG_API_ID: %s", idStr))
+		}
+		p = payload{ID: id, Hash: hashStr}
+	} else {
+		raw, err := os.ReadFile(filepath.Clean(*inPath))
+		if err != nil {
+			fatal(fmt.Errorf("read %s: %w", *inPath, err))
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			fatal(fmt.Errorf("parse %s: %w", *inPath, err))
+		}
+		p.Hash = strings.TrimSpace(p.Hash)
+		if p.ID <= 0 || p.Hash == "" {
+			fatal(errors.New("invalid secrets file: expected {\"id\": <positive int>, \"hash\": \"...\"}"))
+		}
 	}
 
 	// "Random string" stored in the binary too — this is obfuscation, not true secrecy.
