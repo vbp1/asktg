@@ -601,7 +601,7 @@ func (s *Service) RunRealtime(ctx context.Context, chatIDs []int64, onEvent func
 	})
 
 	return s.withClientUsingOptions(ctx, apiID, apiHash, tdtelegram.Options{
-		SessionStorage: &tdtelegram.FileSessionStorage{
+		SessionStorage: &SafeFileSessionStorage{
 			Path: s.sessionPath,
 		},
 		UpdateHandler: manager,
@@ -1624,7 +1624,7 @@ func (s *Service) withClient(ctx context.Context, apiID int, apiHash string, fn 
 	defer s.runMu.Unlock()
 
 	return s.withClientUsingOptions(ctx, apiID, apiHash, tdtelegram.Options{
-		SessionStorage: &tdtelegram.FileSessionStorage{
+		SessionStorage: &SafeFileSessionStorage{
 			Path: s.sessionPath,
 		},
 	}, fn)
