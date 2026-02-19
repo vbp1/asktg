@@ -3555,8 +3555,9 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 		limit = 25
 	}
 	type scored struct {
-		item domain.SearchResult
-		rrf  float64
+		item    domain.SearchResult
+		rrf     float64
+		rankRRF float64
 	}
 	merged := map[string]scored{}
 	apply := func(items []domain.SearchResult, weight float64) {
@@ -3567,7 +3568,9 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 			if !ok {
 				current = scored{item: item}
 			}
-			current.rrf += weight / (k + float64(idx+1))
+			score := weight / (k + float64(idx+1))
+			current.rrf += score
+			current.rankRRF += score
 			if item.Timestamp > current.item.Timestamp {
 				current.item.Timestamp = item.Timestamp
 			}
@@ -3590,8 +3593,12 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 	out := make([]scored, 0, len(merged))
 	nowUnix := time.Now().Unix()
 	for _, item := range merged {
-		item.rrf += recencyBoostScore(item.item.Timestamp, nowUnix)
+		recency := recencyBoostScore(item.item.Timestamp, nowUnix)
+		item.rrf += recency
 		item.item.Score = -item.rrf
+		item.item.RRFScore = item.rrf
+		item.item.RRFRank = item.rankRRF
+		item.item.RecencyBoost = recency
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {

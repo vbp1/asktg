@@ -319,6 +319,18 @@
     return Math.max(-1, Math.min(1, numeric)).toFixed(3);
   }
 
+  function formatRRF(result) {
+    const rrf = Number(result.rrf_score);
+    if (!Number.isFinite(rrf) || rrf === 0) return null;
+    const rank = Number(result.rrf_rank) || 0;
+    const recency = Number(result.recency_boost) || 0;
+    const s = 10000;
+    return {
+      total: (rrf * s).toFixed(1),
+      tooltip: `RRF×${s} = rank(${(rank * s).toFixed(1)}) + recency(${(recency * s).toFixed(1)})`,
+    };
+  }
+
   function formatBuildTime(value) {
     const raw = String(value || "").trim();
     if (!raw || raw === "unknown") return "unknown";
@@ -1375,6 +1387,11 @@
                 {#if formatSemanticSimilarity(result.semantic_similarity)}
                   <span class="semanticSimilarity" title="Cosine similarity">
                     sim: {formatSemanticSimilarity(result.semantic_similarity)}
+                  </span>
+                {/if}
+                {#if formatRRF(result)}
+                  <span class="semanticSimilarity" title={formatRRF(result).tooltip}>
+                    rrf: {formatRRF(result).total}
                   </span>
                 {/if}
               {/if}

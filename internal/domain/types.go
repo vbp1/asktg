@@ -64,6 +64,9 @@ type SearchResult struct {
 	FileDocID          int64   `json:"file_doc_id,omitempty"`
 	Score              float64 `json:"score"`
 	SemanticSimilarity float64 `json:"semantic_similarity,omitempty"`
+	RRFScore           float64 `json:"rrf_score,omitempty"`
+	RRFRank            float64 `json:"rrf_rank,omitempty"`
+	RecencyBoost       float64 `json:"recency_boost,omitempty"`
 	DeepLink           string  `json:"deep_link,omitempty"`
 	MatchFTS           bool    `json:"match_fts,omitempty"`
 	MatchSemantic      bool    `json:"match_semantic,omitempty"`
