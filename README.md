@@ -24,12 +24,7 @@ Built with Go, Svelte, and [Wails](https://wails.io). Windows-first.
 
 ## Installation
 
-Download the latest version from the [Releases](https://github.com/vbp1/asktg/releases) page. Each release includes two options:
-
-| File | Description |
-|------|-------------|
-| `asktg-amd64-installer.exe` | NSIS installer — sets up the app, creates Start Menu shortcut, and provides an uninstaller |
-| `asktg.exe` | Standalone portable binary — no installation required, just run it |
+Download the latest version from the [Releases](https://github.com/vbp1/asktg/releases) page. `asktg.exe` - standalone portable binary — no installation required, just run it
 
 Alternatively, build from source (see [Development](#development)).
 
