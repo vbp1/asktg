@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net"
 	"net/url"
@@ -86,6 +87,23 @@ var semanticProfiles = map[string]semanticProfile{
 	"very":    {MaxDistance: 1.40, Slack: 0.25},
 	"similar": {MaxDistance: 1.70, Slack: 0.35},
 	"weak":    {MaxDistance: 1.90, Slack: 0.45},
+}
+
+var semanticBridgeTermMap = map[string]string{
+	"лог":              "logs",
+	"логи":             "logs",
+	"ошибка":           "error",
+	"ошибки":           "errors",
+	"трейс":            "trace",
+	"трейсы":           "traces",
+	"запрос":           "query",
+	"запросы":          "queries",
+	"производительность": "performance",
+	"метрика":          "metrics",
+	"метрики":          "metrics",
+	"бд":               "database",
+	"база":             "database",
+	"базы":             "databases",
 }
 
 // App struct
@@ -1309,12 +1327,21 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	vectors, err := a.embedClient.Embed(ctx, []string{req.Query})
 	if err != nil || len(vectors) == 0 {
 		if err != nil {
-			runtime.LogWarningf(a.ctx, "hybrid query embedding failed: %v", err)
+			a.safeLogWarningf("hybrid query embedding failed: %v", err)
 		}
 		return ftsResults, nil
 	}
 
 	vectorCandidates := a.vectorIndex.Search(vectors[0], 300)
+	if anchor := semanticLatinAnchorQuery(req.Query); anchor != "" {
+		anchorVectors, anchorErr := a.embedClient.Embed(ctx, []string{anchor})
+		if anchorErr != nil {
+			a.safeLogWarningf("hybrid anchor query embedding failed: %v", anchorErr)
+		} else if len(anchorVectors) > 0 {
+			anchorCandidates := a.vectorIndex.Search(anchorVectors[0], 300)
+			vectorCandidates = mergeVectorCandidates(vectorCandidates, anchorCandidates, 300)
+		}
+	}
 	profile := a.semanticProfile(ctx)
 	vectorCandidates = filterSemanticCandidates(vectorCandidates, profile)
 	if len(vectorCandidates) == 0 {
@@ -1322,7 +1349,7 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	}
 	vectorResults, err := a.lookupVectorCandidates(ctx, req, vectorCandidates)
 	if err != nil {
-		runtime.LogWarningf(a.ctx, "hybrid vector candidate lookup failed: %v", err)
+		a.safeLogWarningf("hybrid vector candidate lookup failed: %v", err)
 		return ftsResults, nil
 	}
 	return fuseByRRF(ftsResults, vectorResults, req.Filters.Limit), nil
@@ -1389,6 +1416,127 @@ func filterSemanticCandidates(candidates []vector.Candidate, profile semanticPro
 		}
 	}
 	return out
+}
+
+func mergeVectorCandidates(primary, secondary []vector.Candidate, limit int) []vector.Candidate {
+	if len(primary) == 0 {
+		if limit > 0 && len(secondary) > limit {
+			secondary = append([]vector.Candidate(nil), secondary[:limit]...)
+		}
+		return secondary
+	}
+	if len(secondary) == 0 {
+		if limit > 0 && len(primary) > limit {
+			primary = append([]vector.Candidate(nil), primary[:limit]...)
+		}
+		return primary
+	}
+
+	merged := make(map[int64]vector.Candidate, len(primary)+len(secondary))
+	consume := func(items []vector.Candidate) {
+		for _, item := range items {
+			if item.ChunkID == 0 {
+				continue
+			}
+			existing, ok := merged[item.ChunkID]
+			if !ok {
+				merged[item.ChunkID] = item
+				continue
+			}
+			if item.Distance < existing.Distance {
+				merged[item.ChunkID] = item
+				continue
+			}
+			if item.Distance == existing.Distance && item.RawRank < existing.RawRank {
+				existing.RawRank = item.RawRank
+				merged[item.ChunkID] = existing
+			}
+		}
+	}
+	consume(primary)
+	consume(secondary)
+
+	out := make([]vector.Candidate, 0, len(merged))
+	for _, item := range merged {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Distance == out[j].Distance {
+			return out[i].RawRank < out[j].RawRank
+		}
+		return out[i].Distance < out[j].Distance
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	for idx := range out {
+		out[idx].RawRank = idx + 1
+	}
+	return out
+}
+
+func semanticLatinAnchorQuery(raw string) string {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return ""
+	}
+	tokens := strings.FieldsFunc(clean, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if len(tokens) == 0 {
+		return ""
+	}
+
+	seen := make(map[string]struct{}, len(tokens))
+	latin := make([]string, 0, len(tokens))
+	bridge := make([]string, 0, len(tokens))
+	hasNonLatinLetters := false
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		normalized := strings.ToLower(token)
+		if mapped, ok := semanticBridgeTermMap[normalized]; ok {
+			if _, exists := seen[mapped]; !exists {
+				seen[mapped] = struct{}{}
+				bridge = append(bridge, mapped)
+			}
+		}
+
+		hasLatin := false
+		for _, r := range token {
+			if !unicode.IsLetter(r) {
+				continue
+			}
+			if isASCIILatinLetter(r) {
+				hasLatin = true
+				continue
+			}
+			hasNonLatinLetters = true
+		}
+		if !hasLatin {
+			continue
+		}
+		key := normalized
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		latin = append(latin, key)
+	}
+	if !hasNonLatinLetters || len(latin) == 0 {
+		return ""
+	}
+	parts := append(latin, bridge...)
+	anchor := strings.Join(parts, " ")
+	if strings.EqualFold(anchor, clean) {
+		return ""
+	}
+	return anchor
+}
+
+func isASCIILatinLetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 func cosineSimilarityFromSquaredL2(distance float64) float64 {
@@ -3770,6 +3918,10 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 
 func resultKey(chatID int64, msgID int64) string {
 	return strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(msgID, 10)
+}
+
+func (a *App) safeLogWarningf(format string, args ...any) {
+	log.Printf("WARN: "+format, args...)
 }
 
 func recencyBoostScore(timestamp int64, nowUnix int64) float64 {
