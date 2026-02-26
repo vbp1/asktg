@@ -252,6 +252,110 @@ func TestChatReactionModeDefaultsOffAndPersists(t *testing.T) {
 	}
 }
 
+func TestEnqueueURLTaskRequeuesFailedAfterCooldown(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	if err := store.UpsertChat(ctx, domain.ChatPolicy{
+		ChatID:          1,
+		Title:           "chat",
+		Type:            "group",
+		Enabled:         true,
+		HistoryMode:     "full",
+		AllowEmbeddings: false,
+		URLsMode:        "lazy",
+		ReactionMode:    "off",
+	}); err != nil {
+		t.Fatalf("upsert chat failed: %v", err)
+	}
+	if err := store.UpsertMessage(ctx, domain.Message{
+		ChatID:        1,
+		MsgID:         10,
+		Timestamp:     now,
+		SenderID:      1,
+		SenderDisplay: "you",
+		Text:          "https://example.com/x",
+		HasURL:        true,
+	}); err != nil {
+		t.Fatalf("upsert message failed: %v", err)
+	}
+
+	if err := store.EnqueueURLTask(ctx, 1, 10, "https://example.com/x", 5); err != nil {
+		t.Fatalf("enqueue initial url task failed: %v", err)
+	}
+	task, ok, err := store.ClaimURLTask(ctx, now+10)
+	if err != nil || !ok {
+		t.Fatalf("claim url task failed ok=%v err=%v", ok, err)
+	}
+	if err := store.FailTask(ctx, task.TaskID); err != nil {
+		t.Fatalf("fail task failed: %v", err)
+	}
+
+	// Cooldown not reached yet, enqueue should keep task failed.
+	if err := store.EnqueueURLTask(ctx, 1, 10, "https://example.com/x", 3); err != nil {
+		t.Fatalf("enqueue during cooldown failed: %v", err)
+	}
+	var state string
+	var attempts int
+	if err := store.db.QueryRowContext(ctx, `
+SELECT state, attempts
+FROM tasks
+WHERE task_id = ?
+`, task.TaskID).Scan(&state, &attempts); err != nil {
+		t.Fatalf("query task after cooldown enqueue failed: %v", err)
+	}
+	if state != "failed" {
+		t.Fatalf("expected failed state during cooldown, got %q", state)
+	}
+
+	// Simulate cooldown expiry.
+	expiredAt := now - int64(urlFailedTaskReenqueueAfter/time.Second) - 10
+	if _, err := store.db.ExecContext(ctx, `
+UPDATE tasks
+SET next_run_at = ?
+WHERE task_id = ?
+`, expiredAt, task.TaskID); err != nil {
+		t.Fatalf("expire cooldown update failed: %v", err)
+	}
+
+	if err := store.EnqueueURLTask(ctx, 1, 10, "https://example.com/x", 2); err != nil {
+		t.Fatalf("enqueue after cooldown failed: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `
+SELECT state, attempts
+FROM tasks
+WHERE task_id = ?
+`, task.TaskID).Scan(&state, &attempts); err != nil {
+		t.Fatalf("query task after requeue failed: %v", err)
+	}
+	if state != "pending" {
+		t.Fatalf("expected pending state after cooldown, got %q", state)
+	}
+	if attempts != 0 {
+		t.Fatalf("expected attempts reset to 0, got %d", attempts)
+	}
+
+	if err := store.MarkTaskDead(ctx, task.TaskID); err != nil {
+		t.Fatalf("mark task dead failed: %v", err)
+	}
+	if err := store.EnqueueURLTask(ctx, 1, 10, "https://example.com/x", 1); err != nil {
+		t.Fatalf("enqueue dead task failed: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `
+SELECT state
+FROM tasks
+WHERE task_id = ?
+`, task.TaskID).Scan(&state); err != nil {
+		t.Fatalf("query dead task failed: %v", err)
+	}
+	if state != "dead" {
+		t.Fatalf("expected dead task to remain dead, got %q", state)
+	}
+
+	assertCount(t, store, `SELECT COUNT(1) FROM tasks WHERE type = 'url_fetch'`, 1)
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")

@@ -51,7 +51,7 @@ const (
 	realtimeReconnectBase       = 1 * time.Second
 	realtimeReconnectMax        = 30 * time.Second
 	urlCandidateScanLimit       = 40
-	urlTaskMaxAttempts          = 3
+	urlTaskMaxAttempts          = 7
 	pdfTaskMaxAttempts          = 3
 	embedTaskMaxAttempts        = 4
 	embedCandidateLimit         = 60
@@ -126,6 +126,7 @@ type App struct {
 
 	pdfBackfillMu      sync.Mutex
 	pdfBackfillRunning bool
+	urlHostBackoff     map[string]time.Time
 }
 
 // NewApp creates a new App application struct
@@ -133,6 +134,7 @@ func NewApp() *App {
 	return &App{
 		trayStatus:        "initializing",
 		realtimeRefreshCh: make(chan struct{}, 1),
+		urlHostBackoff:    make(map[string]time.Time),
 	}
 }
 
@@ -1707,11 +1709,11 @@ func (a *App) CreateBackup(destination string) (string, error) {
 		}
 	}
 	manifest := map[string]any{
-		"created_at":      time.Now().UTC().Format(time.RFC3339),
-		"db_file":         "app.db",
-		"includes_vec":    fileExists(graphPath),
+		"created_at":       time.Now().UTC().Format(time.RFC3339),
+		"db_file":          "app.db",
+		"includes_vec":     fileExists(graphPath),
 		"includes_session": hasSession,
-		"version":         buildinfo.Version,
+		"version":          buildinfo.Version,
 	}
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -2760,6 +2762,12 @@ func (a *App) runURLFetchLoop(ctx context.Context) {
 			}
 			continue
 		}
+		if pauseUntil, paused := a.urlHostPauseUntil(task.URL, time.Now()); paused {
+			if retryErr := a.store.RetryTask(ctx, task.TaskID, pauseUntil.Unix()); retryErr != nil {
+				runtime.LogWarningf(a.ctx, "URL task host-pause retry failed id=%d err=%v", task.TaskID, retryErr)
+			}
+			continue
+		}
 
 		processCtx, processCancel := context.WithTimeout(ctx, 30*time.Second)
 		processErr := a.processURLTask(processCtx, task)
@@ -2770,19 +2778,157 @@ func (a *App) runURLFetchLoop(ctx context.Context) {
 			}
 			continue
 		}
-
-		if task.Attempts >= urlTaskMaxAttempts {
-			if err := a.store.FailTask(ctx, task.TaskID); err != nil {
-				runtime.LogWarningf(a.ctx, "URL task fail mark failed id=%d err=%v", task.TaskID, err)
+		disposition := classifyURLTaskError(processErr)
+		if disposition.Terminal {
+			if err := a.store.MarkTaskDead(ctx, task.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "URL task dead mark failed id=%d err=%v", task.TaskID, err)
 			}
+			runtime.LogWarningf(a.ctx, "URL task terminal failure id=%d chat=%d msg=%d reason=%s err=%v", task.TaskID, task.ChatID, task.MsgID, disposition.Reason, processErr)
+			continue
+		}
+		if task.Attempts >= urlTaskMaxAttempts {
+			if err := a.store.MarkTaskDead(ctx, task.TaskID); err != nil {
+				runtime.LogWarningf(a.ctx, "URL task dead mark failed id=%d err=%v", task.TaskID, err)
+			}
+			runtime.LogWarningf(a.ctx, "URL task exhausted retries id=%d chat=%d msg=%d attempts=%d err=%v", task.TaskID, task.ChatID, task.MsgID, task.Attempts, processErr)
 			continue
 		}
 
-		backoff := int64(task.Attempts * 30)
-		if retryErr := a.store.RetryTask(ctx, task.TaskID, time.Now().Unix()+backoff); retryErr != nil {
+		nextRunAt := time.Now().Add(urlTaskRetryBackoff(task.Attempts))
+		if pauseUntil := a.noteURLHostPause(task.URL, disposition.HostPause, time.Now()); !pauseUntil.IsZero() && pauseUntil.After(nextRunAt) {
+			nextRunAt = pauseUntil
+		}
+		if retryErr := a.store.RetryTask(ctx, task.TaskID, nextRunAt.Unix()); retryErr != nil {
 			runtime.LogWarningf(a.ctx, "URL task retry failed id=%d err=%v", task.TaskID, retryErr)
 		}
 	}
+}
+
+type urlTaskErrorDisposition struct {
+	Terminal  bool
+	HostPause time.Duration
+	Reason    string
+}
+
+func urlTaskRetryBackoff(attempt int) time.Duration {
+	switch {
+	case attempt <= 1:
+		return 5 * time.Minute
+	case attempt == 2:
+		return 30 * time.Minute
+	case attempt == 3:
+		return 2 * time.Hour
+	case attempt == 4:
+		return 12 * time.Hour
+	case attempt == 5:
+		return 24 * time.Hour
+	case attempt == 6:
+		return 72 * time.Hour
+	default:
+		return 7 * 24 * time.Hour
+	}
+}
+
+func classifyURLTaskError(err error) urlTaskErrorDisposition {
+	if err == nil {
+		return urlTaskErrorDisposition{}
+	}
+	if errors.Is(err, urlfetch.ErrURLBlocked) {
+		return urlTaskErrorDisposition{Terminal: true, Reason: "blocked"}
+	}
+	if errors.Is(err, urlfetch.ErrFetchTooLarge) {
+		return urlTaskErrorDisposition{Terminal: true, Reason: "too_large"}
+	}
+
+	var statusErr *urlfetch.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		code := statusErr.StatusCode
+		switch code {
+		case 400, 401, 403, 404, 410, 451:
+			return urlTaskErrorDisposition{Terminal: true, Reason: fmt.Sprintf("http_%d", code)}
+		case 408, 425:
+			return urlTaskErrorDisposition{Reason: fmt.Sprintf("http_%d", code)}
+		case 429:
+			return urlTaskErrorDisposition{HostPause: 10 * time.Minute, Reason: "http_429"}
+		default:
+			if code >= 500 {
+				return urlTaskErrorDisposition{HostPause: 3 * time.Minute, Reason: fmt.Sprintf("http_%d", code)}
+			}
+			if code >= 400 {
+				return urlTaskErrorDisposition{Terminal: true, Reason: fmt.Sprintf("http_%d", code)}
+			}
+		}
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return urlTaskErrorDisposition{Reason: "timeout"}
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return urlTaskErrorDisposition{Reason: "network_timeout"}
+		}
+		return urlTaskErrorDisposition{Reason: "network_error"}
+	}
+
+	var netURLErr *url.Error
+	if errors.As(err, &netURLErr) {
+		return urlTaskErrorDisposition{Reason: "url_error"}
+	}
+
+	return urlTaskErrorDisposition{Reason: "transient_error"}
+}
+
+func normalizeURLHost(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host
+}
+
+func (a *App) urlHostPauseUntil(rawURL string, now time.Time) (time.Time, bool) {
+	host := normalizeURLHost(rawURL)
+	if host == "" {
+		return time.Time{}, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.urlHostBackoff == nil {
+		a.urlHostBackoff = make(map[string]time.Time)
+	}
+	until, ok := a.urlHostBackoff[host]
+	if !ok {
+		return time.Time{}, false
+	}
+	if now.After(until) {
+		delete(a.urlHostBackoff, host)
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+func (a *App) noteURLHostPause(rawURL string, hold time.Duration, now time.Time) time.Time {
+	if hold <= 0 {
+		return time.Time{}
+	}
+	host := normalizeURLHost(rawURL)
+	if host == "" {
+		return time.Time{}
+	}
+	until := now.Add(hold)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.urlHostBackoff == nil {
+		a.urlHostBackoff = make(map[string]time.Time)
+	}
+	if existing, ok := a.urlHostBackoff[host]; ok && existing.After(until) {
+		return existing
+	}
+	a.urlHostBackoff[host] = until
+	return until
 }
 
 func (a *App) enqueueURLCandidates(ctx context.Context) {

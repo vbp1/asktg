@@ -25,6 +25,8 @@ type Store struct {
 	db *sql.DB
 }
 
+const urlFailedTaskReenqueueAfter = 6 * time.Hour
+
 type URLTask struct {
 	TaskID   int64
 	ChatID   int64
@@ -2245,15 +2247,53 @@ func (s *Store) EnqueueURLTask(ctx context.Context, chatID int64, msgID int64, r
 		return err
 	}
 
-	var exists int
+	var (
+		taskID    int64
+		state     string
+		nextRunAt int64
+	)
 	if err := s.db.QueryRowContext(ctx, `
-SELECT 1
+SELECT task_id, state, next_run_at
 FROM tasks
 WHERE type = 'url_fetch'
   AND payload = ?
+ORDER BY created_at DESC
 LIMIT 1
-`, string(encoded)).Scan(&exists); err == nil && exists == 1 {
-		return nil
+`, string(encoded)).Scan(&taskID, &state, &nextRunAt); err == nil {
+		nowUnix := time.Now().Unix()
+		state = strings.ToLower(strings.TrimSpace(state))
+		switch state {
+		case "pending", "running", "done":
+			return nil
+		case "dead":
+			return nil
+		case "failed":
+			cooldownUntil := nextRunAt + int64(urlFailedTaskReenqueueAfter/time.Second)
+			if nowUnix < cooldownUntil {
+				return nil
+			}
+			_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    attempts = 0,
+    next_run_at = ?,
+    priority = ?,
+    created_at = ?
+WHERE task_id = ?
+`, nowUnix, priority, nowUnix, taskID)
+			return err
+		default:
+			_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'pending',
+    attempts = 0,
+    next_run_at = ?,
+    priority = ?,
+    created_at = ?
+WHERE task_id = ?
+`, nowUnix, priority, nowUnix, taskID)
+			return err
+		}
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -2484,7 +2524,22 @@ WHERE task_id = ?
 }
 
 func (s *Store) FailTask(ctx context.Context, taskID int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET state = 'failed' WHERE task_id = ?`, taskID)
+	_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'failed',
+    next_run_at = CAST(strftime('%s','now') AS INTEGER)
+WHERE task_id = ?
+`, taskID)
+	return err
+}
+
+func (s *Store) MarkTaskDead(ctx context.Context, taskID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE tasks
+SET state = 'dead',
+    next_run_at = CAST(strftime('%s','now') AS INTEGER)
+WHERE task_id = ?
+`, taskID)
 	return err
 }
 

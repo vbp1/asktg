@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -31,6 +32,21 @@ type Result struct {
 	ExtractedText string
 	ContentType   string
 	Hash          string
+}
+
+type HTTPStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if strings.TrimSpace(e.Status) != "" {
+		return e.Status
+	}
+	return fmt.Sprintf("http status %d", e.StatusCode)
 }
 
 func ExtractURLs(text string, limit int) []string {
@@ -92,7 +108,10 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return Result{}, errors.New(resp.Status)
+		return Result{}, &HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+		}
 	}
 
 	if err := security.ValidateFetchURL(resp.Request.URL.String()); err != nil {

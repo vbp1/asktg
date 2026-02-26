@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"asktg/internal/urlfetch"
 )
 
 func TestTrackReadMaxMessageID(t *testing.T) {
@@ -73,5 +77,88 @@ func TestNormalizeReactionMode(t *testing.T) {
 	}
 	if got := normalizeReactionMode("invalid"); got != reactionModeOff {
 		t.Fatalf("expected fallback off mode, got %q", got)
+	}
+}
+
+func TestURLTaskRetryBackoff(t *testing.T) {
+	if got := urlTaskRetryBackoff(1); got != 5*time.Minute {
+		t.Fatalf("attempt 1 backoff mismatch: %v", got)
+	}
+	if got := urlTaskRetryBackoff(3); got != 2*time.Hour {
+		t.Fatalf("attempt 3 backoff mismatch: %v", got)
+	}
+	if got := urlTaskRetryBackoff(7); got != 7*24*time.Hour {
+		t.Fatalf("attempt 7 backoff mismatch: %v", got)
+	}
+	if got := urlTaskRetryBackoff(99); got != 7*24*time.Hour {
+		t.Fatalf("capped backoff mismatch: %v", got)
+	}
+}
+
+func TestClassifyURLTaskError(t *testing.T) {
+	cases := []struct {
+		name         string
+		err          error
+		terminal     bool
+		expectPause  bool
+		expectReason string
+	}{
+		{
+			name:         "blocked",
+			err:          urlfetch.ErrURLBlocked,
+			terminal:     true,
+			expectPause:  false,
+			expectReason: "blocked",
+		},
+		{
+			name:         "404",
+			err:          &urlfetch.HTTPStatusError{StatusCode: 404, Status: "404 Not Found"},
+			terminal:     true,
+			expectPause:  false,
+			expectReason: "http_404",
+		},
+		{
+			name:         "429",
+			err:          &urlfetch.HTTPStatusError{StatusCode: 429, Status: "429 Too Many Requests"},
+			terminal:     false,
+			expectPause:  true,
+			expectReason: "http_429",
+		},
+		{
+			name:         "500",
+			err:          &urlfetch.HTTPStatusError{StatusCode: 500, Status: "500 Internal Server Error"},
+			terminal:     false,
+			expectPause:  true,
+			expectReason: "http_500",
+		},
+		{
+			name:         "deadline",
+			err:          context.DeadlineExceeded,
+			terminal:     false,
+			expectPause:  false,
+			expectReason: "timeout",
+		},
+		{
+			name:         "unknown",
+			err:          errors.New("boom"),
+			terminal:     false,
+			expectPause:  false,
+			expectReason: "transient_error",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := classifyURLTaskError(tc.err)
+			if out.Terminal != tc.terminal {
+				t.Fatalf("terminal mismatch: got=%v want=%v", out.Terminal, tc.terminal)
+			}
+			if (out.HostPause > 0) != tc.expectPause {
+				t.Fatalf("host pause mismatch: got=%v want=%v", out.HostPause > 0, tc.expectPause)
+			}
+			if out.Reason != tc.expectReason {
+				t.Fatalf("reason mismatch: got=%q want=%q", out.Reason, tc.expectReason)
+			}
+		})
 	}
 }
