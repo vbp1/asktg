@@ -135,3 +135,12 @@ func TestIsReactionUnavailable(t *testing.T) {
 		t.Fatal("expected plain error to not be treated as reaction-unavailable")
 	}
 }
+
+func TestIsRecoverableDialogLookupError(t *testing.T) {
+	if !isRecoverableDialogLookupError(errors.New("callback: get offset peer: chat 123 not found")) {
+		t.Fatal("expected offset-peer lookup error to be recoverable")
+	}
+	if isRecoverableDialogLookupError(errors.New("random failure")) {
+		t.Fatal("expected random error to be non-recoverable")
+	}
+}

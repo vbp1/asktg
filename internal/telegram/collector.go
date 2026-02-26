@@ -772,22 +772,36 @@ type resolvedDialog struct {
 
 func collectDialogLookup(ctx context.Context, client *tdtelegram.Client) (map[int64]resolvedDialog, error) {
 	lookup := make(map[int64]resolvedDialog, 256)
-	queryBuilder := query.GetDialogs(client.API()).BatchSize(100)
-	err := queryBuilder.ForEach(ctx, func(_ context.Context, elem dialogs.Elem) error {
+	iter := query.GetDialogs(client.API()).BatchSize(100).Iter()
+	for iter.Next(ctx) {
+		elem := iter.Value()
 		dialog, ok := dialogFromElem(elem)
 		if !ok || strings.TrimSpace(dialog.Title) == "" {
-			return nil
+			continue
 		}
 		lookup[dialog.ChatID] = resolvedDialog{
 			dialog: dialog,
 			peer:   elem.Peer,
 		}
-		return nil
-	})
+	}
+	err := iter.Err()
 	if err != nil {
+		// Some accounts contain stale/broken dialog peers that break offset pagination.
+		// Keep already collected dialogs so chat-scoped operations (read/reaction) can proceed.
+		if isRecoverableDialogLookupError(err) && len(lookup) > 0 {
+			return lookup, nil
+		}
 		return nil, err
 	}
 	return lookup, nil
+}
+
+func isRecoverableDialogLookupError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "get offset peer")
 }
 
 type syncRunMetrics struct {
