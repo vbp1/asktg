@@ -6,9 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+)
+
+const (
+	requestTimeout = 3 * time.Second
+	httpTimeout    = 4 * time.Second
+	retries        = 2
+	retryBackoff   = 300 * time.Millisecond
 )
 
 type Client interface {
@@ -38,7 +46,7 @@ func NewHTTPClient(baseURL, apiKey, model string, dimensions int) *HTTPClient {
 		model:      cleanModel,
 		dimensions: dimensions,
 		client: &http.Client{
-			Timeout: 45 * time.Second,
+			Timeout: httpTimeout,
 		},
 	}
 }
@@ -83,7 +91,40 @@ func (c *HTTPClient) Embed(ctx context.Context, input []string) ([][]float32, er
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(encoded))
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		vectors, embedErr := c.embedOnce(ctx, encoded, len(input))
+		if embedErr == nil {
+			return vectors, nil
+		}
+		lastErr = embedErr
+		if attempt >= retries || !shouldRetryEmbedError(embedErr) {
+			break
+		}
+		backoff := time.Duration(attempt+1) * retryBackoff
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, lastErr
+}
+
+type requestError struct {
+	StatusCode int
+	Payload    map[string]any
+}
+
+func (e *requestError) Error() string {
+	return fmt.Sprintf("embeddings request failed: status=%d body=%v", e.StatusCode, e.Payload)
+}
+
+func (c *HTTPClient) embedOnce(ctx context.Context, encoded []byte, inputCount int) ([][]float32, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(encoded))
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +140,10 @@ func (c *HTTPClient) Embed(ctx context.Context, input []string) ([][]float32, er
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var payload map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&payload)
-		return nil, fmt.Errorf("embeddings request failed: status=%d body=%v", resp.StatusCode, payload)
+		return nil, &requestError{
+			StatusCode: resp.StatusCode,
+			Payload:    payload,
+		}
 	}
 
 	var parsed embeddingsResponse
@@ -109,9 +153,9 @@ func (c *HTTPClient) Embed(ctx context.Context, input []string) ([][]float32, er
 	if len(parsed.Data) == 0 {
 		return nil, errors.New("empty embeddings response")
 	}
-	out := make([][]float32, len(input))
+	out := make([][]float32, inputCount)
 	for _, item := range parsed.Data {
-		if item.Index < 0 || item.Index >= len(input) {
+		if item.Index < 0 || item.Index >= inputCount {
 			continue
 		}
 		out[item.Index] = item.Embedding
@@ -122,6 +166,33 @@ func (c *HTTPClient) Embed(ctx context.Context, input []string) ([][]float32, er
 		}
 	}
 	return out, nil
+}
+
+func shouldRetryEmbedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var statusErr *requestError
+	if errors.As(err, &statusErr) {
+		if statusErr.StatusCode == http.StatusTooManyRequests {
+			return true
+		}
+		if statusErr.StatusCode >= 500 {
+			return true
+		}
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+	return false
 }
 
 type StubClient struct{}

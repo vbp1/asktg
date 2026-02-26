@@ -67,13 +67,13 @@ func TestSemanticLatinAnchorQuery(t *testing.T) {
 		query string
 		want  string
 	}{
-		{name: "mixed query", query: "логи postgres", want: "postgres logs"},
-		{name: "mixed multiple latin tokens", query: "ошибка postgres wal", want: "postgres wal error"},
-		{name: "inflected tracing", query: "трейсинг postgres", want: "postgres tracing"},
-		{name: "workload phrase", query: "генератор нагрузки postgres", want: "postgres generator workload"},
+		{name: "mixed query", query: "логи postgres", want: "postgres"},
+		{name: "mixed multiple latin tokens", query: "ошибка postgres wal", want: "postgres wal"},
+		{name: "inflected tracing", query: "трейсинг postgres", want: "postgres"},
+		{name: "workload phrase", query: "генератор нагрузки postgres", want: "postgres"},
 		{name: "latin only", query: "postgres logs", want: ""},
 		{name: "cyrillic only", query: "логи постгрес", want: ""},
-		{name: "dedupe latin", query: "ошибка postgres postgres", want: "postgres error"},
+		{name: "dedupe latin", query: "ошибка postgres postgres", want: "postgres"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,5 +108,37 @@ func TestMergeVectorCandidates(t *testing.T) {
 	}
 	if merged[0].RawRank != 1 || merged[1].RawRank != 2 || merged[2].RawRank != 3 {
 		t.Fatalf("expected ranks to be normalized after merge, got %#v", merged)
+	}
+}
+
+func TestRerankByAnchorCoveragePromotesCoverage(t *testing.T) {
+	items := []domain.SearchResult{
+		{
+			ChatID:    1,
+			MsgID:     1,
+			Timestamp: 100,
+			Snippet:   "postgres metrics only",
+			RRFScore:  0.0210,
+			Score:     -0.0210,
+		},
+		{
+			ChatID:    1,
+			MsgID:     2,
+			Timestamp: 100,
+			Snippet:   "postgres clickhouse metrics extension",
+			RRFScore:  0.0202,
+			Score:     -0.0202,
+		},
+	}
+
+	reranked := rerankByAnchorCoverage(items, "postgres clickhouse metrics", 10)
+	if len(reranked) != 2 {
+		t.Fatalf("unexpected reranked size: %d", len(reranked))
+	}
+	if reranked[0].MsgID != 2 {
+		t.Fatalf("expected higher-coverage item first, got msg=%d", reranked[0].MsgID)
+	}
+	if reranked[0].RRFScore <= reranked[1].RRFScore {
+		t.Fatalf("expected boosted score to be greater: %.6f <= %.6f", reranked[0].RRFScore, reranked[1].RRFScore)
 	}
 }
