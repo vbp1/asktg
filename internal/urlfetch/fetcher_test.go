@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,24 @@ func TestExtractContentPDF(t *testing.T) {
 	}
 	if !strings.Contains(extracted, "Hello PDF world") {
 		t.Fatalf("expected extracted text to contain phrase, got: %q", extracted)
+	}
+}
+
+func TestSetBrowserLikeHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating request: %v", err)
+	}
+	setBrowserLikeHeaders(req)
+
+	if got := req.Header.Get("User-Agent"); got != browserLikeUserAgent {
+		t.Fatalf("unexpected User-Agent: %q", got)
+	}
+	if got := req.Header.Get("Accept"); got != browserLikeAccept {
+		t.Fatalf("unexpected Accept: %q", got)
+	}
+	if got := req.Header.Get("Accept-Language"); got == "" {
+		t.Fatal("expected Accept-Language to be set")
 	}
 }
 

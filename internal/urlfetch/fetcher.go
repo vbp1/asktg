@@ -26,6 +26,11 @@ var (
 	ErrFetchTooLarge = errors.New("response body exceeds maximum size")
 )
 
+const (
+	browserLikeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	browserLikeAccept    = "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.8,image/avif,image/webp,*/*;q=0.7"
+)
+
 type Result struct {
 	FinalURL      string
 	Title         string
@@ -99,8 +104,7 @@ func Fetch(ctx context.Context, rawURL string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	req.Header.Set("User-Agent", "asktg-url-fetch/0.1")
-	req.Header.Set("Accept", "application/pdf, text/html, text/plain;q=0.9, */*;q=0.5")
+	setBrowserLikeHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -244,4 +248,16 @@ func minInt(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func setBrowserLikeHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("User-Agent", browserLikeUserAgent)
+	req.Header.Set("Accept", browserLikeAccept)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
