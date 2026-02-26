@@ -69,6 +69,8 @@ func TestSemanticLatinAnchorQuery(t *testing.T) {
 	}{
 		{name: "mixed query", query: "логи postgres", want: "postgres logs"},
 		{name: "mixed multiple latin tokens", query: "ошибка postgres wal", want: "postgres wal error"},
+		{name: "inflected tracing", query: "трейсинг postgres", want: "postgres tracing"},
+		{name: "workload phrase", query: "генератор нагрузки postgres", want: "postgres generator workload"},
 		{name: "latin only", query: "postgres logs", want: ""},
 		{name: "cyrillic only", query: "логи постгрес", want: ""},
 		{name: "dedupe latin", query: "ошибка postgres postgres", want: "postgres error"},

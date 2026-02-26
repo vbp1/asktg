@@ -96,14 +96,27 @@ var semanticBridgeTermMap = map[string]string{
 	"ошибки":           "errors",
 	"трейс":            "trace",
 	"трейсы":           "traces",
+	"трейсинг":         "tracing",
 	"запрос":           "query",
 	"запросы":          "queries",
 	"производительность": "performance",
+	"производительности": "performance",
 	"метрика":          "metrics",
 	"метрики":          "metrics",
+	"мониторинг":       "monitoring",
 	"бд":               "database",
 	"база":             "database",
 	"базы":             "databases",
+	"генератор":        "generator",
+	"нагрузка":         "workload",
+	"нагрузки":         "workload",
+	"восстановление":   "restore",
+	"резервного":       "backup",
+	"копирования":      "backup",
+	"индексов":         "index",
+	"хуки":             "hooks",
+	"роутер":           "router",
+	"дашборд":          "dashboard",
 }
 
 // App struct
@@ -1324,6 +1337,21 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 		return ftsResults, nil
 	}
 
+	anchorQuery := semanticLatinAnchorQuery(req.Query)
+	if anchorQuery != "" {
+		anchorReq := req
+		anchorReq.Query = anchorQuery
+		anchorFTS, anchorErr := a.store.Search(ctx, anchorReq)
+		if anchorErr != nil {
+			a.safeLogWarningf("hybrid anchor FTS search failed: %v", anchorErr)
+		} else if len(anchorFTS) > 0 {
+			for idx := range anchorFTS {
+				anchorFTS[idx].MatchFTS = true
+			}
+			ftsResults = mergeRankedResultsByRRF(ftsResults, anchorFTS, req.Filters.Limit)
+		}
+	}
+
 	vectors, err := a.embedClient.Embed(ctx, []string{req.Query})
 	if err != nil || len(vectors) == 0 {
 		if err != nil {
@@ -1333,8 +1361,8 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	}
 
 	vectorCandidates := a.vectorIndex.Search(vectors[0], 300)
-	if anchor := semanticLatinAnchorQuery(req.Query); anchor != "" {
-		anchorVectors, anchorErr := a.embedClient.Embed(ctx, []string{anchor})
+	if anchorQuery != "" {
+		anchorVectors, anchorErr := a.embedClient.Embed(ctx, []string{anchorQuery})
 		if anchorErr != nil {
 			a.safeLogWarningf("hybrid anchor query embedding failed: %v", anchorErr)
 		} else if len(anchorVectors) > 0 {
@@ -1351,6 +1379,9 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	if err != nil {
 		a.safeLogWarningf("hybrid vector candidate lookup failed: %v", err)
 		return ftsResults, nil
+	}
+	if anchorQuery != "" {
+		return fuseByRRFWeighted(ftsResults, vectorResults, req.Filters.Limit, 1.8, 1.0), nil
 	}
 	return fuseByRRF(ftsResults, vectorResults, req.Filters.Limit), nil
 }
@@ -1475,6 +1506,75 @@ func mergeVectorCandidates(primary, secondary []vector.Candidate, limit int) []v
 	return out
 }
 
+func mergeRankedResultsByRRF(primary, secondary []domain.SearchResult, limit int) []domain.SearchResult {
+	if len(primary) == 0 {
+		return secondary
+	}
+	if len(secondary) == 0 {
+		return primary
+	}
+	return mergeRankedResultsByRRFWeighted(primary, secondary, limit, 1.0, 4.0)
+}
+
+func mergeRankedResultsByRRFWeighted(primary, secondary []domain.SearchResult, limit int, primaryWeight, secondaryWeight float64) []domain.SearchResult {
+	unlimited := limit == -1
+	if !unlimited && (limit <= 0 || limit > 100) {
+		limit = 25
+	}
+	type scored struct {
+		item  domain.SearchResult
+		score float64
+	}
+	merged := map[string]scored{}
+	apply := func(items []domain.SearchResult, weight float64) {
+		const k = 60.0
+		for idx, item := range items {
+			key := resultKey(item.ChatID, item.MsgID)
+			current, ok := merged[key]
+			if !ok {
+				current = scored{item: item}
+			}
+			current.score += weight / (k + float64(idx+1))
+			if item.Timestamp > current.item.Timestamp {
+				current.item.Timestamp = item.Timestamp
+			}
+			if current.item.Snippet == "" {
+				current.item.Snippet = item.Snippet
+			}
+			current.item.MatchFTS = current.item.MatchFTS || item.MatchFTS
+			current.item.MatchSemantic = current.item.MatchSemantic || item.MatchSemantic
+			if item.MatchSemantic && item.SemanticSimilarity > current.item.SemanticSimilarity {
+				current.item.SemanticSimilarity = item.SemanticSimilarity
+			}
+			merged[key] = current
+		}
+	}
+	apply(primary, primaryWeight)
+	apply(secondary, secondaryWeight)
+
+	out := make([]scored, 0, len(merged))
+	for _, item := range merged {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].score == out[j].score {
+			return out[i].item.Timestamp > out[j].item.Timestamp
+		}
+		return out[i].score > out[j].score
+	})
+	maxIdx := len(out)
+	if !unlimited && limit < maxIdx {
+		maxIdx = limit
+	}
+	results := make([]domain.SearchResult, 0, maxIdx)
+	for idx := 0; idx < maxIdx; idx++ {
+		item := out[idx].item
+		item.Score = -out[idx].score
+		results = append(results, item)
+	}
+	return results
+}
+
 func semanticLatinAnchorQuery(raw string) string {
 	clean := strings.TrimSpace(raw)
 	if clean == "" {
@@ -1496,11 +1596,12 @@ func semanticLatinAnchorQuery(raw string) string {
 			continue
 		}
 		normalized := strings.ToLower(token)
-		if mapped, ok := semanticBridgeTermMap[normalized]; ok {
-			if _, exists := seen[mapped]; !exists {
-				seen[mapped] = struct{}{}
-				bridge = append(bridge, mapped)
+		for _, mapped := range semanticBridgeTerms(normalized) {
+			if _, exists := seen[mapped]; exists {
+				continue
 			}
+			seen[mapped] = struct{}{}
+			bridge = append(bridge, mapped)
 		}
 
 		hasLatin := false
@@ -1533,6 +1634,59 @@ func semanticLatinAnchorQuery(raw string) string {
 		return ""
 	}
 	return anchor
+}
+
+func semanticBridgeTerms(token string) []string {
+	if token == "" {
+		return nil
+	}
+	out := make([]string, 0, 3)
+	if mapped, ok := semanticBridgeTermMap[token]; ok {
+		out = append(out, mapped)
+	}
+	add := func(mapped string) {
+		for _, existing := range out {
+			if existing == mapped {
+				return
+			}
+		}
+		out = append(out, mapped)
+	}
+	switch {
+	case strings.HasPrefix(token, "лог"):
+		add("logs")
+	case strings.HasPrefix(token, "ошиб"):
+		add("error")
+	case strings.HasPrefix(token, "трейс"):
+		add("tracing")
+	case strings.HasPrefix(token, "монитор"):
+		add("monitoring")
+	case strings.HasPrefix(token, "производитель"):
+		add("performance")
+	case strings.HasPrefix(token, "запрос"):
+		add("query")
+	case strings.HasPrefix(token, "метрик"):
+		add("metrics")
+	case strings.HasPrefix(token, "баз") || token == "бд":
+		add("database")
+	case strings.HasPrefix(token, "генератор"):
+		add("generator")
+	case strings.HasPrefix(token, "нагруз"):
+		add("workload")
+	case strings.HasPrefix(token, "восстанов"):
+		add("restore")
+	case strings.HasPrefix(token, "резерв") || strings.HasPrefix(token, "копир"):
+		add("backup")
+	case strings.HasPrefix(token, "индекс"):
+		add("index")
+	case strings.HasPrefix(token, "хук"):
+		add("hooks")
+	case strings.HasPrefix(token, "роут"):
+		add("router")
+	case strings.HasPrefix(token, "дашборд"):
+		add("dashboard")
+	}
+	return out
 }
 
 func isASCIILatinLetter(r rune) bool {
@@ -3844,6 +3998,10 @@ func fileExists(path string) bool {
 }
 
 func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []domain.SearchResult {
+	return fuseByRRFWeighted(ftsResults, vectorResults, limit, 1.0, 1.0)
+}
+
+func fuseByRRFWeighted(ftsResults, vectorResults []domain.SearchResult, limit int, ftsWeight float64, vectorWeight float64) []domain.SearchResult {
 	unlimited := limit == -1
 	if !unlimited && (limit <= 0 || limit > 100) {
 		limit = 25
@@ -3881,8 +4039,8 @@ func fuseByRRF(ftsResults, vectorResults []domain.SearchResult, limit int) []dom
 			merged[key] = current
 		}
 	}
-	apply(ftsResults, 1.0)
-	apply(vectorResults, 1.0)
+	apply(ftsResults, ftsWeight)
+	apply(vectorResults, vectorWeight)
 
 	out := make([]scored, 0, len(merged))
 	nowUnix := time.Now().Unix()
