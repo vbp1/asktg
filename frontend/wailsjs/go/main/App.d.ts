@@ -40,6 +40,8 @@ export function PurgeAll():Promise<domain.IndexStatus>;
 
 export function PurgeChat(arg1:number):Promise<domain.IndexStatus>;
 
+export function QueryTranslationConfig():Promise<domain.QueryTranslationConfig>;
+
 export function RealtimeRefreshNow():Promise<string>;
 
 export function RebuildSemanticIndex():Promise<string>;
@@ -63,6 +65,8 @@ export function SetDataDir(arg1:string):Promise<string>;
 export function SetEmbeddingsConfig(arg1:string,arg2:string,arg3:string,arg4:number):Promise<void>;
 
 export function SetMCPPort(arg1:number):Promise<domain.IndexStatus>;
+
+export function SetQueryTranslationConfig(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function SetSearchUISettings(arg1:string,arg2:string,arg3:boolean):Promise<domain.SearchUISettings>;
 
@@ -89,6 +93,8 @@ export function TelegramRequestCode(arg1:string):Promise<domain.TelegramAuthStat
 export function TelegramSignIn(arg1:string,arg2:string):Promise<domain.TelegramAuthStatus>;
 
 export function TestEmbeddings():Promise<domain.EmbeddingsTestResult>;
+
+export function TestQueryTranslation():Promise<domain.QueryTranslationTestResult>;
 
 export function ToggleMCP(arg1:boolean):Promise<void>;
 

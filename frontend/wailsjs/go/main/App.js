@@ -78,6 +78,10 @@ export function PurgeChat(arg1) {
   return window['go']['main']['App']['PurgeChat'](arg1);
 }
 
+export function QueryTranslationConfig() {
+  return window['go']['main']['App']['QueryTranslationConfig']();
+}
+
 export function RealtimeRefreshNow() {
   return window['go']['main']['App']['RealtimeRefreshNow']();
 }
@@ -124,6 +128,10 @@ export function SetEmbeddingsConfig(arg1, arg2, arg3, arg4) {
 
 export function SetMCPPort(arg1) {
   return window['go']['main']['App']['SetMCPPort'](arg1);
+}
+
+export function SetQueryTranslationConfig(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetQueryTranslationConfig'](arg1, arg2, arg3);
 }
 
 export function SetSearchUISettings(arg1, arg2, arg3) {
@@ -176,6 +184,10 @@ export function TelegramSignIn(arg1, arg2) {
 
 export function TestEmbeddings() {
   return window['go']['main']['App']['TestEmbeddings']();
+}
+
+export function TestQueryTranslation() {
+  return window['go']['main']['App']['TestQueryTranslation']();
 }
 
 export function ToggleMCP(arg1) {

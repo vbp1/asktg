@@ -236,6 +236,44 @@ export namespace domain {
 	        this.enabled_chats = source["enabled_chats"];
 	    }
 	}
+	export class QueryTranslationConfig {
+	    base_url: string;
+	    model: string;
+	    configured: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new QueryTranslationConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.base_url = source["base_url"];
+	        this.model = source["model"];
+	        this.configured = source["configured"];
+	    }
+	}
+	export class QueryTranslationTestResult {
+	    ok: boolean;
+	    base_url: string;
+	    model: string;
+	    translation: string;
+	    took_ms: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QueryTranslationTestResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.base_url = source["base_url"];
+	        this.model = source["model"];
+	        this.translation = source["translation"];
+	        this.took_ms = source["took_ms"];
+	        this.error = source["error"];
+	    }
+	}
 	export class SearchResult {
 	    chat_id: number;
 	    msg_id: number;

@@ -892,6 +892,44 @@ func (a *App) SetEmbeddingsConfig(baseURL, model, apiKey string, dimensions int)
 	return nil
 }
 
+func (a *App) QueryTranslationConfig() (domain.QueryTranslationConfig, error) {
+	if a.store == nil {
+		return domain.QueryTranslationConfig{}, errors.New("store is not initialized")
+	}
+	cfg := a.queryTranslateConfig(a.ctx)
+	return domain.QueryTranslationConfig{
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		Configured: strings.TrimSpace(cfg.APIKey) != "",
+	}, nil
+}
+
+func (a *App) SetQueryTranslationConfig(baseURL, model, apiKey string) error {
+	if a.store == nil {
+		return errors.New("store is not initialized")
+	}
+
+	cleanBase := strings.TrimSpace(baseURL)
+	if err := a.store.SetSetting(a.ctx, "query_translation_base_url", cleanBase); err != nil {
+		return err
+	}
+
+	cleanModel := strings.TrimSpace(model)
+	if cleanModel == "" {
+		cleanModel = queryTranslateModelDefault
+	}
+	if err := a.store.SetSetting(a.ctx, "query_translation_model", cleanModel); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(apiKey) != "" {
+		if err := a.writeSecretSetting(a.ctx, "query_translation_api_key", apiKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *App) TestEmbeddings() (domain.EmbeddingsTestResult, error) {
 	if a.store == nil {
 		return domain.EmbeddingsTestResult{}, errors.New("store is not initialized")
@@ -940,6 +978,55 @@ func (a *App) TestEmbeddings() (domain.EmbeddingsTestResult, error) {
 		Dimensions: dims,
 		VectorLen:  vectorLen,
 		TookMs:     took.Milliseconds(),
+	}, nil
+}
+
+func (a *App) TestQueryTranslation() (domain.QueryTranslationTestResult, error) {
+	if a.store == nil {
+		return domain.QueryTranslationTestResult{}, errors.New("store is not initialized")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
+	defer cancel()
+
+	cfg := a.queryTranslateConfig(ctx)
+	if !cfg.Configured() {
+		return domain.QueryTranslationTestResult{
+			OK:      false,
+			BaseURL: cfg.BaseURL,
+			Model:   cfg.Model,
+			Error:   "query translation client is not configured",
+		}, nil
+	}
+
+	start := time.Now()
+	translated, err := requestQueryTranslation(ctx, cfg, "логи postgres")
+	took := time.Since(start)
+	if err != nil {
+		return domain.QueryTranslationTestResult{
+			OK:      false,
+			BaseURL: cfg.BaseURL,
+			Model:   cfg.Model,
+			TookMs:  took.Milliseconds(),
+			Error:   err.Error(),
+		}, nil
+	}
+	translated = sanitizeQueryTranslation("логи postgres", translated)
+	if translated == "" {
+		return domain.QueryTranslationTestResult{
+			OK:      false,
+			BaseURL: cfg.BaseURL,
+			Model:   cfg.Model,
+			TookMs:  took.Milliseconds(),
+			Error:   "empty translation output",
+		}, nil
+	}
+
+	return domain.QueryTranslationTestResult{
+		OK:          true,
+		BaseURL:     cfg.BaseURL,
+		Model:       cfg.Model,
+		Translation: translated,
+		TookMs:      took.Milliseconds(),
 	}, nil
 }
 

@@ -127,6 +127,12 @@ type EmbeddingsConfig struct {
 	Configured bool   `json:"configured"`
 }
 
+type QueryTranslationConfig struct {
+	BaseURL    string `json:"base_url"`
+	Model      string `json:"model"`
+	Configured bool   `json:"configured"`
+}
+
 type EmbeddingsTestResult struct {
 	OK         bool   `json:"ok"`
 	BaseURL    string `json:"base_url"`
@@ -135,6 +141,15 @@ type EmbeddingsTestResult struct {
 	VectorLen  int    `json:"vector_len"`
 	TookMs     int64  `json:"took_ms"`
 	Error      string `json:"error,omitempty"`
+}
+
+type QueryTranslationTestResult struct {
+	OK          bool   `json:"ok"`
+	BaseURL     string `json:"base_url"`
+	Model       string `json:"model"`
+	Translation string `json:"translation"`
+	TookMs      int64  `json:"took_ms"`
+	Error       string `json:"error,omitempty"`
 }
 
 type OnboardingStatus struct {

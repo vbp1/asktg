@@ -40,8 +40,14 @@
   let embDims = 3072;
   let embAPIKey = "";
   let embConfigured = false;
+  let trBaseURL = "";
+  let trModel = "";
+  let trAPIKey = "";
+  let trConfigured = false;
   let embTestBusy = false;
   let embTest = null;
+  let trTestBusy = false;
+  let trTest = null;
   let embProgress = null;
   let embProgressBusy = false;
   let embProgressTimer = null;
@@ -49,6 +55,7 @@
   let statusPollBusy = false;
   let statusPollTick = 0;
   let embeddingsEditMode = false;
+  let translationEditMode = false;
   let semanticStrictness = "similar"; // "very" | "similar" | "weak"
   let semanticStrictnessBusy = false;
   let autostartEnabled = false;
@@ -513,6 +520,13 @@
     infoText = "";
   }
 
+  function startTranslationEdit() {
+    translationEditMode = true;
+    trAPIKey = "";
+    errorText = "";
+    infoText = "";
+  }
+
   async function cancelEmbeddingsEdit() {
     embeddingsEditMode = false;
     embAPIKey = "";
@@ -524,6 +538,19 @@
     const ok = await saveEmbeddingsConfig();
     if (ok) {
       embeddingsEditMode = false;
+    }
+  }
+
+  async function cancelTranslationEdit() {
+    translationEditMode = false;
+    trAPIKey = "";
+    await refreshQueryTranslationConfig();
+  }
+
+  async function applyTranslationEdit() {
+    const ok = await saveQueryTranslationConfig();
+    if (ok) {
+      translationEditMode = false;
     }
   }
 
@@ -541,6 +568,25 @@
       }
       if (!embConfigured && !embeddingsEditMode) {
         embeddingsEditMode = true;
+      }
+    } catch (error) {
+      errorText = String(error);
+    }
+  }
+
+  async function refreshQueryTranslationConfig() {
+    if (!backend()?.QueryTranslationConfig) {
+      return;
+    }
+    try {
+      const cfg = await backend().QueryTranslationConfig();
+      if (!translationEditMode) {
+        trBaseURL = cfg.base_url || embBaseURL || "https://api.openai.com/v1";
+        trModel = cfg.model || "openai/gpt-4.1-mini";
+      }
+      trConfigured = Boolean(cfg.configured);
+      if (!translationEditMode) {
+        trAPIKey = "";
       }
     } catch (error) {
       errorText = String(error);
@@ -661,6 +707,9 @@
         }
         if (!embeddingsEditMode && !maintenanceBusy && statusPollTick % 4 === 0) {
           await refreshEmbeddingsConfig();
+        }
+        if (!translationEditMode && !maintenanceBusy && statusPollTick % 4 === 0) {
+          await refreshQueryTranslationConfig();
         }
         if (!maintenanceBusy && statusPollTick % 4 === 0) {
           await refreshEmbeddingsProgress({ silent: true });
@@ -1114,7 +1163,29 @@
       const dims = Number(embDims);
       await backend().SetEmbeddingsConfig(embBaseURL, embModel, embAPIKey, dims);
       await refreshEmbeddingsConfig();
+      await refreshQueryTranslationConfig();
       infoText = "Embeddings config saved";
+      ok = true;
+    } catch (error) {
+      errorText = String(error);
+    } finally {
+      maintenanceBusy = false;
+    }
+    return ok;
+  }
+
+  async function saveQueryTranslationConfig() {
+    if (!backend()?.SetQueryTranslationConfig) {
+      return false;
+    }
+    maintenanceBusy = true;
+    errorText = "";
+    infoText = "";
+    let ok = false;
+    try {
+      await backend().SetQueryTranslationConfig(trBaseURL, trModel, trAPIKey);
+      await refreshQueryTranslationConfig();
+      infoText = "Translator config saved";
       ok = true;
     } catch (error) {
       errorText = String(error);
@@ -1139,6 +1210,28 @@
       errorText = String(error);
     } finally {
       embTestBusy = false;
+    }
+  }
+
+  async function testQueryTranslation() {
+    if (!backend()?.TestQueryTranslation) {
+      errorText = "Translator test is not available in this build";
+      return;
+    }
+    trTestBusy = true;
+    errorText = "";
+    infoText = "";
+    try {
+      trTest = await backend().TestQueryTranslation();
+      if (trTest && trTest.ok) {
+        infoText = `Translator OK (${trTest.took_ms} ms): ${trTest.translation}`;
+      } else if (trTest) {
+        errorText = `Translator test failed: ${trTest.error || "unknown error"}`;
+      }
+    } catch (error) {
+      errorText = String(error);
+    } finally {
+      trTestBusy = false;
     }
   }
 
@@ -1176,6 +1269,7 @@
   refreshTelegramStatus();
   refreshOnboardingStatus();
   refreshEmbeddingsConfig();
+  refreshQueryTranslationConfig();
   refreshSemanticStrictness();
   refreshSearchUISettings();
   refreshAutostart();
@@ -1441,7 +1535,7 @@
         <button class:active={settingsTab === "mcp"} on:click={() => (settingsTab = "mcp")}>MCP</button>
         <button class:active={settingsTab === "storage"} on:click={() => (settingsTab = "storage")}>Storage</button>
         <button class:active={settingsTab === "telegram"} on:click={() => (settingsTab = "telegram")}>Telegram</button>
-        <button class:active={settingsTab === "embeddings"} on:click={() => (settingsTab = "embeddings")}>Embeddings</button>
+        <button class:active={settingsTab === "embeddings"} on:click={() => (settingsTab = "embeddings")}>AI Search</button>
         <button class:active={settingsTab === "backup"} on:click={() => (settingsTab = "backup")}>Backup</button>
       </div>
     </section>
@@ -1636,9 +1730,6 @@
           disabled={!embeddingsEditMode}
         />
         {#if embeddingsEditMode}
-          <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy}>
-            {embTestBusy ? "Testing..." : "Test embeddings"}
-          </button>
           <button on:click={applyEmbeddingsEdit} disabled={maintenanceBusy}>
             {maintenanceBusy ? "Working..." : "Apply"}
           </button>
@@ -1646,6 +1737,9 @@
         {:else}
           <button on:click={startEmbeddingsEdit} disabled={maintenanceBusy}>Change</button>
         {/if}
+        <button on:click={testEmbeddings} disabled={embTestBusy || maintenanceBusy}>
+          {embTestBusy ? "Testing..." : "Test embeddings"}
+        </button>
         <button on:click={rebuildSemanticIndex} disabled={maintenanceBusy || !embConfigured}>
           {maintenanceBusy ? "Working..." : "Rebuild semantic index"}
         </button>
@@ -1666,6 +1760,41 @@
           <progress max="100" value={embProgressPercent}></progress>
         </div>
       {/if}
+    </section>
+
+    <section class="panel">
+      <h2>LLM Translator</h2>
+      <div class="status">
+        <span>Translator: {trConfigured ? "configured" : "not configured"}</span>
+      </div>
+      <div class="row wrap">
+        <input
+          bind:value={trBaseURL}
+          class="pathInput"
+          placeholder="Translator base URL (OpenAI-compatible)"
+          disabled={!translationEditMode}
+        />
+        <input bind:value={trModel} placeholder="Translator model" disabled={!translationEditMode} />
+        <input
+          bind:value={trAPIKey}
+          type="password"
+          class="pathInput"
+          placeholder={translationEditMode ? "Translator API key (leave empty to keep current)" : (trConfigured ? "Configured API key" : "Translator API key")}
+          disabled={!translationEditMode}
+        />
+        {#if translationEditMode}
+          <button on:click={applyTranslationEdit} disabled={maintenanceBusy}>
+            {maintenanceBusy ? "Working..." : "Apply"}
+          </button>
+          <button on:click={cancelTranslationEdit} disabled={maintenanceBusy}>Cancel</button>
+        {:else}
+          <button on:click={startTranslationEdit} disabled={maintenanceBusy}>Change</button>
+        {/if}
+        <button on:click={testQueryTranslation} disabled={trTestBusy || maintenanceBusy}>
+          {trTestBusy ? "Testing..." : "Test translator"}
+        </button>
+      </div>
+      <p class="mutedLine translatorDefaultsHint">By default translator uses embeddings endpoint and API key. Default model: openai/gpt-4.1-mini.</p>
     </section>
     {/if}
 
