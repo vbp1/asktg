@@ -1401,6 +1401,7 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	if translatedQuery != "" {
 		fused = fuseByRRFWeighted(ftsResults, vectorResults, req.Filters.Limit, 1.7, 1.0)
 		fused = rerankByAnchorCoverage(fused, translatedQuery, req.Filters.Limit)
+		fused = calibrateHybridScores(fused, translatedQuery, req.Filters.Limit)
 	}
 	return fused, nil
 }
@@ -1749,6 +1750,123 @@ func rerankByAnchorCoverage(results []domain.SearchResult, anchorQuery string, l
 		out = append(out, scoredItems[idx].item)
 	}
 	return out
+}
+
+func calibrateHybridScores(results []domain.SearchResult, query string, limit int) []domain.SearchResult {
+	if len(results) < 2 {
+		return results
+	}
+	tokens := anchorRankingTokens(query)
+	if len(tokens) == 0 {
+		return results
+	}
+	entityTokens := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if isEntityLikeToken(token) {
+			entityTokens = append(entityTokens, token)
+		}
+	}
+	type scored struct {
+		item  domain.SearchResult
+		score float64
+	}
+	scoredItems := make([]scored, 0, len(results))
+	for _, item := range results {
+		base := item.RRFScore
+		if base <= 0 {
+			base = -item.Score
+		}
+		titleText := strings.ToLower(strings.TrimSpace(item.URLTitle))
+		fileText := strings.ToLower(strings.TrimSpace(item.FileName))
+		snippetText := strings.ToLower(strings.TrimSpace(item.Snippet))
+		bodyText := strings.ToLower(strings.TrimSpace(item.MessageText))
+		text := strings.Join([]string{titleText, fileText, snippetText, bodyText}, " ")
+		matched := 0
+		for _, token := range tokens {
+			if strings.Contains(text, token) {
+				matched++
+			}
+		}
+		entityMatched := 0
+		for _, token := range entityTokens {
+			if strings.Contains(text, token) {
+				entityMatched++
+			}
+		}
+		coverage := float64(matched) / float64(len(tokens))
+		semantic := (item.SemanticSimilarity + 1.0) / 2.0
+		if semantic < 0 {
+			semantic = 0
+		}
+		if semantic > 1 {
+			semantic = 1
+		}
+		ftsSignal := 0.0
+		if item.MatchFTS {
+			ftsSignal = 1.0
+		}
+		calibrated := base +
+			0.0028*coverage +
+			0.0012*semantic +
+			0.0008*ftsSignal
+		if len(entityTokens) > 0 {
+			calibrated += 0.0022 * (float64(entityMatched) / float64(len(entityTokens)))
+		}
+		item.RRFScore = calibrated
+		item.Score = -calibrated
+		scoredItems = append(scoredItems, scored{item: item, score: calibrated})
+	}
+	sort.Slice(scoredItems, func(i, j int) bool {
+		if scoredItems[i].score == scoredItems[j].score {
+			return scoredItems[i].item.Timestamp > scoredItems[j].item.Timestamp
+		}
+		return scoredItems[i].score > scoredItems[j].score
+	})
+
+	unlimited := limit == -1
+	maxIdx := len(scoredItems)
+	if !unlimited {
+		if limit <= 0 || limit > 100 {
+			limit = 25
+		}
+		if limit < maxIdx {
+			maxIdx = limit
+		}
+	}
+	out := make([]domain.SearchResult, 0, maxIdx)
+	for idx := 0; idx < maxIdx; idx++ {
+		out = append(out, scoredItems[idx].item)
+	}
+	return out
+}
+
+func isEntityLikeToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	hasDigit := false
+	hasUnderscore := false
+	for _, r := range token {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+		}
+		if r == '_' || r == '-' {
+			hasUnderscore = true
+		}
+	}
+	if hasDigit || hasUnderscore {
+		return true
+	}
+	if len(token) <= 2 {
+		return false
+	}
+	asciiLetters := 0
+	for _, r := range token {
+		if isASCIILatinLetter(r) {
+			asciiLetters++
+		}
+	}
+	return asciiLetters == len(token) && len(token) >= 4
 }
 
 func isASCIILatinLetter(r rune) bool {
