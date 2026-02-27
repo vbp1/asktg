@@ -1286,33 +1286,71 @@ func (a *App) Search(query string, mode string, advanced bool, chatIDs []int64, 
 }
 
 func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]domain.SearchResult, error) {
-	ftsResults, err := a.store.Search(ctx, req)
+	if req.Mode != domain.SearchModeHybrid {
+		ftsResults, err := a.store.Search(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		for idx := range ftsResults {
+			ftsResults[idx].MatchFTS = true
+		}
+		return ftsResults, nil
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		ftsResults, err := a.store.Search(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		for idx := range ftsResults {
+			ftsResults[idx].MatchFTS = true
+		}
+		return ftsResults, nil
+	}
+	if a.embedClient == nil || !a.embedClient.Configured() {
+		ftsResults, err := a.store.Search(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		for idx := range ftsResults {
+			ftsResults[idx].MatchFTS = true
+		}
+		return ftsResults, nil
+	}
+	if a.vectorIndex == nil {
+		ftsResults, err := a.store.Search(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		for idx := range ftsResults {
+			ftsResults[idx].MatchFTS = true
+		}
+		return ftsResults, nil
+	}
+	enabled, err := a.hasEmbeddingsScope(ctx, req.Filters.ChatIDs)
+	if err != nil || !enabled {
+		ftsResults, searchErr := a.store.Search(ctx, req)
+		if searchErr != nil {
+			return nil, searchErr
+		}
+		for idx := range ftsResults {
+			ftsResults[idx].MatchFTS = true
+		}
+		return ftsResults, nil
+	}
+
+	hybridReq := req
+	hybridReq.Filters.Limit = hybridCandidateLimit(req.Filters.Limit)
+	ftsResults, err := a.store.Search(ctx, hybridReq)
 	if err != nil {
 		return nil, err
 	}
 	for idx := range ftsResults {
 		ftsResults[idx].MatchFTS = true
 	}
-	if req.Mode != domain.SearchModeHybrid {
-		return ftsResults, nil
-	}
-	if strings.TrimSpace(req.Query) == "" {
-		return ftsResults, nil
-	}
-	if a.embedClient == nil || !a.embedClient.Configured() {
-		return ftsResults, nil
-	}
-	if a.vectorIndex == nil {
-		return ftsResults, nil
-	}
-	enabled, err := a.hasEmbeddingsScope(ctx, req.Filters.ChatIDs)
-	if err != nil || !enabled {
-		return ftsResults, nil
-	}
 
 	translatedQuery := a.translateQueryRUToEN(ctx, req.Query)
 	if translatedQuery != "" {
-		translatedReq := req
+		translatedReq := hybridReq
 		translatedReq.Query = translatedQuery
 		translatedFTS, translatedErr := a.store.Search(ctx, translatedReq)
 		if translatedErr != nil {
@@ -1352,7 +1390,9 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 	if len(vectorCandidates) == 0 {
 		return ftsResults, nil
 	}
-	vectorResults, err := a.lookupVectorCandidates(ctx, req, vectorCandidates)
+	vectorReq := req
+	vectorReq.Filters.Limit = hybridReq.Filters.Limit
+	vectorResults, err := a.lookupVectorCandidates(ctx, vectorReq, vectorCandidates)
 	if err != nil {
 		a.safeLogWarningf("hybrid vector candidate lookup failed: %v", err)
 		return ftsResults, nil
@@ -1363,6 +1403,23 @@ func (a *App) searchMessages(ctx context.Context, req domain.SearchRequest) ([]d
 		fused = rerankByAnchorCoverage(fused, translatedQuery, req.Filters.Limit)
 	}
 	return fused, nil
+}
+
+func hybridCandidateLimit(limit int) int {
+	if limit == -1 {
+		return -1
+	}
+	if limit <= 0 {
+		return 120
+	}
+	internal := limit * 6
+	if internal < 100 {
+		internal = 100
+	}
+	if internal > 300 {
+		internal = 300
+	}
+	return internal
 }
 
 func (a *App) semanticProfile(ctx context.Context) semanticProfile {
